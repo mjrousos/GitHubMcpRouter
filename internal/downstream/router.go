@@ -83,11 +83,20 @@ func (r *Router) AllClients(ctx context.Context) ([]OwnerClient, error) {
 		err    error
 	}
 	results := make([]result, len(installations))
+	// Bound how many children we start simultaneously.
+	sem := make(chan struct{}, MaxFanoutConcurrency)
 	var wg sync.WaitGroup
 	for i, inst := range installations {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			results[i] = result{owner: inst.Account, err: ctx.Err()}
+			continue
+		}
 		wg.Add(1)
 		go func(i int, inst githubapp.Installation) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			caller, err := r.manager.caller(ctx, inst.ID)
 			results[i] = result{owner: inst.Account, caller: caller, err: err}
 		}(i, inst)

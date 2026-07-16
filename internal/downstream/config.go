@@ -32,6 +32,11 @@ const (
 	defaultBinaryName = "github-mcp-server"
 )
 
+// MaxFanoutConcurrency bounds how many downstream children are contacted
+// simultaneously during a fan-out (e.g. search_code), so a large number of
+// installations doesn't create a burst of concurrent process starts or RPCs.
+const MaxFanoutConcurrency = 8
+
 // parseAllowedOrgs parses a comma-separated allow-list into a set of lowercased
 // logins.
 //

@@ -113,6 +113,39 @@ func TestSearchCode_AllFail(t *testing.T) {
 	}
 }
 
+func TestSearchCode_ManyOrgsAreBoundedButComplete(t *testing.T) {
+	// More organizations than the fan-out concurrency bound, to exercise the
+	// semaphore path and confirm every org still contributes.
+	const n = 20
+	clients := make([]downstream.OwnerClient, n)
+	for i := range clients {
+		clients[i] = downstream.OwnerClient{
+			Owner:  fmt.Sprintf("org%d", i),
+			Caller: &recordingCaller{result: textResult(codeSearchJSON(1, false, `{"path":"a.go"}`))},
+		}
+	}
+	router := fakeFanoutRouter{clients: clients}
+	cs, ctx := newToolSession(t, func(s *mcp.Server) { AddSearchCode(s, router) })
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_code",
+		Arguments: map[string]any{"query": "x"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %+v", res.Content)
+	}
+	var merged codeSearchResult
+	if err := json.Unmarshal([]byte(textContent(t, res)), &merged); err != nil {
+		t.Fatalf("combined result not valid JSON: %v", err)
+	}
+	if merged.TotalCount != n || len(merged.Items) != n {
+		t.Errorf("merged total_count=%d items=%d, want %d each", merged.TotalCount, len(merged.Items), n)
+	}
+}
+
 func TestSearchCode_NoInstallations(t *testing.T) {
 	router := fakeFanoutRouter{clients: nil}
 	cs, ctx := newToolSession(t, func(s *mcp.Server) { AddSearchCode(s, router) })

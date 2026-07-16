@@ -28,8 +28,8 @@ func AddSearchCode(server *mcp.Server, router fanoutRouter) {
 				"query":   {Type: "string", Description: "Search query using GitHub's powerful code search syntax (see the official get_file_contents/search_code docs)."},
 				"sort":    {Type: "string", Description: "Sort field ('indexed' only)"},
 				"order":   {Type: "string", Description: "Sort order for results", Enum: []any{"asc", "desc"}},
-				"page":    {Type: "number", Description: "Page number for pagination (min 1)"},
-				"perPage": {Type: "number", Description: "Results per page for pagination (min 1, max 100)"},
+				"page":    {Type: "integer", Description: "Page number for pagination (min 1)"},
+				"perPage": {Type: "integer", Description: "Results per page for pagination (min 1, max 100)"},
 			},
 			Required: []string{"query"},
 		},
@@ -45,11 +45,22 @@ func AddSearchCode(server *mcp.Server, router fanoutRouter) {
 		}
 
 		outcomes := make([]searchOutcome, len(clients))
+		// Bound fan-out concurrency so a large number of installations doesn't
+		// create a burst of simultaneous downstream calls, and stop early if the
+		// caller cancels.
+		sem := make(chan struct{}, downstream.MaxFanoutConcurrency)
 		var wg sync.WaitGroup
 		for i, c := range clients {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				outcomes[i] = searchOutcome{owner: c.Owner, err: ctx.Err()}
+				continue
+			}
 			wg.Add(1)
 			go func(i int, c downstream.OwnerClient) {
 				defer wg.Done()
+				defer func() { <-sem }()
 				res, err := c.Caller.CallTool(ctx, &mcp.CallToolParams{
 					Name:      "search_code",
 					Arguments: args,

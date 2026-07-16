@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +12,13 @@ import (
 
 	"github.com/mjrousos/GitHubMcpRouter/internal/githubapp"
 )
+
+// listerFunc adapts a function to InstallationLister.
+type listerFunc func(ctx context.Context) ([]githubapp.Installation, error)
+
+func (f listerFunc) Installations(ctx context.Context) ([]githubapp.Installation, error) {
+	return f(ctx)
+}
 
 // fakeLister is a test InstallationLister whose list can change between calls.
 type fakeLister struct {
@@ -262,6 +270,46 @@ func TestManager_ReconnectsAfterTermination(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func TestDirectory_RefreshDoesNotBlockCacheHits(t *testing.T) {
+	proceed := make(chan struct{})
+	entered := make(chan struct{})
+	var calls int32
+	lister := listerFunc(func(_ context.Context) ([]githubapp.Installation, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return []githubapp.Installation{inst(456, "octo-org")}, nil // preload
+		}
+		close(entered) // a blocking refresh has started (holding loadMu, mid I/O)
+		<-proceed
+		return []githubapp.Installation{inst(456, "octo-org")}, nil
+	})
+	dir := newDirectory(lister, nil)
+
+	// Warm the cache.
+	if _, err := dir.lookup(context.Background(), "octo-org"); err != nil {
+		t.Fatalf("preload: %v", err)
+	}
+
+	// Trigger a refresh that blocks in the network call (a miss reloads).
+	go func() { _, _ = dir.lookup(context.Background(), "missing-org") }()
+	<-entered
+
+	// A cache hit must return promptly rather than blocking on the in-flight
+	// refresh — proving the network call is not made under the map mutex.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := dir.lookup(context.Background(), "octo-org"); err != nil {
+			t.Errorf("cache hit failed: %v", err)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cache hit was blocked by an in-flight refresh")
+	}
+	close(proceed)
 }
 
 func newTestRouter(lister InstallationLister, allowed map[string]struct{}, fc *fakeConnector) *Router {

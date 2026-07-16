@@ -52,9 +52,10 @@ func (s *spawner) connect(ctx context.Context, installationID int64) (downstream
 	session, err := client.Connect(handshakeCtx, &mcp.CommandTransport{Command: cmd}, nil)
 	if err != nil {
 		// Connect may have started the process before failing; make sure it
-		// does not linger.
+		// does not linger, and reap it to avoid a zombie on Unix.
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
 		}
 		return nil, err
 	}
