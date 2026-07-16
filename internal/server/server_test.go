@@ -2,9 +2,16 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"slices"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/mjrousos/GitHubMcpRouter/internal/githubapp"
 )
 
 // newClientFor connects an in-memory client to a server built by New with the
@@ -89,4 +96,41 @@ func TestNewEchoEndToEnd(t *testing.T) {
 	if want := "Message: ROUND TRIP"; got.Text != want {
 		t.Errorf("echo mismatch: got %q, want %q", got.Text, want)
 	}
+}
+
+func TestNewRegistersInstallationsToolWhenAuthenticated(t *testing.T) {
+	cs, ctx := newClientFor(t, Config{Version: "test", Authenticator: testAuthenticator(t)})
+
+	res, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	names := make([]string, 0, len(res.Tools))
+	for _, tool := range res.Tools {
+		names = append(names, tool.Name)
+	}
+
+	if !slices.Contains(names, "echo") || !slices.Contains(names, "list_installations") {
+		t.Errorf("expected both echo and list_installations to be registered, got %v", names)
+	}
+}
+
+// testAuthenticator builds an Authenticator with a freshly generated key. It
+// never contacts GitHub, so it is only useful for wiring/registration checks.
+func testAuthenticator(t *testing.T) *githubapp.Authenticator {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+	auth, err := githubapp.New(githubapp.Config{AppID: 1, PrivateKey: pemBytes})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return auth
 }

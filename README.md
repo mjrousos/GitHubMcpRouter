@@ -12,6 +12,7 @@ The project structure follows the conventions of
 ```
 cmd/mcp-router/      CLI entrypoint (cobra); defines the `stdio` subcommand
 internal/server/     Server construction and the stdio run loop
+internal/githubapp/  GitHub App authentication (JWT + installation tokens)
 pkg/tools/           MCP tool definitions (currently just `echo`)
 ```
 
@@ -47,11 +48,38 @@ interactively. Example host configuration:
 }
 ```
 
+## Authentication
+
+The server authenticates with GitHub as a **GitHub App**, server-to-server. On
+startup it reads the app's credentials from the environment; at request time it
+resolves the relevant **installation** dynamically (by repository, organization,
+or user) and mints a short-lived installation access token (valid one hour,
+refreshed automatically).
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `GITHUB_APP_ID` | yes | Numeric GitHub App ID (used as the JWT issuer). |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | one of the two | Path to the app's PEM private key. **Preferred.** |
+| `GITHUB_APP_PRIVATE_KEY` | one of the two | The PEM private key contents (used only if `_PATH` is unset). |
+| `GITHUB_API_URL` | no | API base URL for GitHub Enterprise Server; defaults to the public API. |
+
+Behavior:
+
+- If none of these variables are set, the server still runs (GitHub-backed tools
+  are simply unavailable) — handy for the `echo` demo below.
+- If they are set, the private key is parsed and validated at startup, so a bad
+  key fails fast with a clear error.
+- Store the private key securely (a key vault or a secret store). Never commit it.
+
 ## Tools
 
-| Tool   | Arguments       | Description                                            |
-| ------ | --------------- | ------------------------------------------------------ |
+| Tool | Arguments | Description |
+| --- | --- | --- |
 | `echo` | `text` (string) | Returns the text upper-cased and prefixed `Message: `. |
+| `list_installations` | none | Lists the GitHub App's installations (ID + account). Requires GitHub App credentials. |
+
+`list_installations` is only registered when GitHub App credentials are
+configured (see [Authentication](#authentication)); `echo` is always available.
 
 ## Try it without an MCP host
 
