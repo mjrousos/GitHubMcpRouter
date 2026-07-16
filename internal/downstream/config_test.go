@@ -13,8 +13,9 @@ func TestParseAllowedOrgs(t *testing.T) {
 		raw  string
 		want map[string]struct{}
 	}{
-		{"empty", "", nil},
-		{"whitespace", "   ,  ,", nil},
+		{"empty means all", "", nil},
+		{"whitespace means all", "   ", nil},
+		{"malformed denies all", "   ,  ,", map[string]struct{}{}},
 		{"single", "Octo-Org", map[string]struct{}{"octo-org": {}}},
 		{"multiple mixed case + spaces", " Org1, org2 ,ORG3 ", map[string]struct{}{"org1": {}, "org2": {}, "org3": {}}},
 	}

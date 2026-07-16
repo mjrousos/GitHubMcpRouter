@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -37,14 +38,23 @@ func (f *fakeLister) callCount() int {
 	return f.calls
 }
 
-// fakeCaller records calls and reports which installation handled them.
-type fakeCaller struct {
+// fakeSession records calls and reports which installation handled them. It
+// stays "alive" until Close is called, which unblocks Wait (mirroring
+// *mcp.ClientSession semantics used by the manager's eviction watcher).
+type fakeSession struct {
 	installationID int64
 	mu             sync.Mutex
 	calls          int
+	done           chan struct{}
+	closeOnce      sync.Once
+	onClose        func()
 }
 
-func (c *fakeCaller) CallTool(_ context.Context, _ *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+func newFakeSession(id int64) *fakeSession {
+	return &fakeSession{installationID: id, done: make(chan struct{})}
+}
+
+func (c *fakeSession) CallTool(_ context.Context, _ *mcp.CallToolParams) (*mcp.CallToolResult, error) {
 	c.mu.Lock()
 	c.calls++
 	c.mu.Unlock()
@@ -53,30 +63,46 @@ func (c *fakeCaller) CallTool(_ context.Context, _ *mcp.CallToolParams) (*mcp.Ca
 	}, nil
 }
 
-// fakeConnector supplies a connectFunc that returns fakeCallers and records
+func (c *fakeSession) Wait() error {
+	<-c.done
+	return nil
+}
+
+func (c *fakeSession) Close() error {
+	c.closeOnce.Do(func() {
+		if c.onClose != nil {
+			c.onClose()
+		}
+		close(c.done)
+	})
+	return nil
+}
+
+// fakeConnector supplies a connectFunc that returns fakeSessions and records
 // connects and closes per installation.
 type fakeConnector struct {
 	mu       sync.Mutex
 	connects map[int64]int
 	closes   map[int64]int
+	sessions map[int64]*fakeSession
 }
 
 func newFakeConnector() *fakeConnector {
-	return &fakeConnector{connects: map[int64]int{}, closes: map[int64]int{}}
+	return &fakeConnector{connects: map[int64]int{}, closes: map[int64]int{}, sessions: map[int64]*fakeSession{}}
 }
 
-func (f *fakeConnector) connect(id int64) (ToolCaller, func() error, error) {
+func (f *fakeConnector) connect(_ context.Context, id int64) (downstreamSession, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.connects[id]++
-	caller := &fakeCaller{installationID: id}
-	closeFn := func() error {
+	session := newFakeSession(id)
+	session.onClose = func() {
 		f.mu.Lock()
-		defer f.mu.Unlock()
 		f.closes[id]++
-		return nil
+		f.mu.Unlock()
 	}
-	return caller, closeFn, nil
+	f.sessions[id] = session
+	return session, nil
 }
 
 func (f *fakeConnector) connectCount(id int64) int {
@@ -89,6 +115,12 @@ func (f *fakeConnector) closeCount(id int64) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closes[id]
+}
+
+func (f *fakeConnector) session(id int64) *fakeSession {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sessions[id]
 }
 
 func inst(id int64, account string) githubapp.Installation {
@@ -130,6 +162,24 @@ func TestDirectory_AllowList(t *testing.T) {
 	}
 }
 
+func TestDirectory_MalformedAllowListDeniesAll(t *testing.T) {
+	lister := &fakeLister{}
+	lister.set(inst(456, "octo-org"))
+	// A malformed allow-list (e.g. GITHUB_APP_ALLOWED_ORGS=",") must fail closed.
+	dir := newDirectory(lister, parseAllowedOrgs(","))
+
+	if _, err := dir.lookup(context.Background(), "octo-org"); err == nil {
+		t.Error("expected a malformed allow-list to deny all owners")
+	}
+	all, err := dir.all(context.Background())
+	if err != nil {
+		t.Fatalf("all: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("expected no allowed installations, got %+v", all)
+	}
+}
+
 func TestDirectory_RefreshOnMiss(t *testing.T) {
 	lister := &fakeLister{}
 	lister.set(inst(456, "octo-org"))
@@ -153,13 +203,14 @@ func TestDirectory_RefreshOnMiss(t *testing.T) {
 func TestManager_CachesAndCloses(t *testing.T) {
 	fc := newFakeConnector()
 	m := newManager(fc.connect)
+	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		if _, err := m.caller(456); err != nil {
+		if _, err := m.caller(ctx, 456); err != nil {
 			t.Fatalf("caller: %v", err)
 		}
 	}
-	if _, err := m.caller(789); err != nil {
+	if _, err := m.caller(ctx, 789); err != nil {
 		t.Fatalf("caller: %v", err)
 	}
 	if got := fc.connectCount(456); got != 1 {
@@ -176,8 +227,40 @@ func TestManager_CachesAndCloses(t *testing.T) {
 		t.Errorf("expected each installation closed once, got 456=%d 789=%d", fc.closeCount(456), fc.closeCount(789))
 	}
 	// After Close, new callers are rejected.
-	if _, err := m.caller(456); err == nil {
+	if _, err := m.caller(ctx, 456); err == nil {
 		t.Error("expected an error from a closed manager")
+	}
+}
+
+func TestManager_ReconnectsAfterTermination(t *testing.T) {
+	fc := newFakeConnector()
+	m := newManager(fc.connect)
+	ctx := context.Background()
+	t.Cleanup(func() { _ = m.Close() })
+
+	if _, err := m.caller(ctx, 456); err != nil {
+		t.Fatalf("caller: %v", err)
+	}
+	if got := fc.connectCount(456); got != 1 {
+		t.Fatalf("connectCount = %d, want 1", got)
+	}
+
+	// Simulate the child terminating; the eviction watcher should drop it.
+	fc.session(456).Close()
+
+	// The next call reconnects (eviction is asynchronous, so retry briefly).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := m.caller(ctx, 456); err != nil {
+			t.Fatalf("caller after termination: %v", err)
+		}
+		if fc.connectCount(456) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected a reconnect after termination; connectCount = %d", fc.connectCount(456))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

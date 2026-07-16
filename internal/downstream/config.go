@@ -33,16 +33,22 @@ const (
 )
 
 // parseAllowedOrgs parses a comma-separated allow-list into a set of lowercased
-// logins. A blank value yields nil, meaning "all installations are allowed".
+// logins.
+//
+//   - A blank value returns nil, meaning "not configured" (all installations
+//     are allowed).
+//   - A non-blank value returns a (possibly empty) set. An empty set — e.g. from
+//     a malformed value like "," — allows nothing, so a configuration typo fails
+//     closed rather than silently allowing every organization.
 func parseAllowedOrgs(raw string) map[string]struct{} {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
 	set := make(map[string]struct{})
 	for _, field := range strings.Split(raw, ",") {
 		if login := strings.ToLower(strings.TrimSpace(field)); login != "" {
 			set[login] = struct{}{}
 		}
-	}
-	if len(set) == 0 {
-		return nil
 	}
 	return set
 }

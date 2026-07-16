@@ -103,8 +103,12 @@ installation and delegates:
   doesn't fail the whole call).
 
 Children are spawned lazily, cached for the server's lifetime, and shut down on
-exit. Each child inherits this server's `GITHUB_APP_ID` / private-key env and
-receives its own `GITHUB_APP_INSTALLATION_ID`.
+exit (a child that exits is evicted and re-spawned on the next call). Each child
+inherits this server's `GITHUB_APP_ID` / private-key env and receives its own
+`GITHUB_APP_INSTALLATION_ID`. Conflicting credentials
+(`GITHUB_PERSONAL_ACCESS_TOKEN`, `GITHUB_TOKEN`) are stripped so children always
+authenticate as the installation, and for GitHub Enterprise the child's
+`GITHUB_HOST` is derived from `GITHUB_API_URL`.
 
 Install the GitHub App-capable github-mcp-server and make sure it is on `PATH`
 (or point `GITHUB_MCP_SERVER_PATH` at it):
@@ -116,7 +120,7 @@ go install github.com/github/github-mcp-server/cmd/github-mcp-server@sammorrowdr
 | Variable | Required | Description |
 | --- | --- | --- |
 | `GITHUB_MCP_SERVER_PATH` | no | Path to the `github-mcp-server` binary; defaults to looking it up on `PATH`. |
-| `GITHUB_APP_ALLOWED_ORGS` | no | Comma-separated org/user logins to delegate to. When unset, every installation of the app is used. |
+| `GITHUB_APP_ALLOWED_ORGS` | no | Comma-separated org/user logins to delegate to. When unset (blank), every installation of the app is used; a non-blank but empty value (e.g. `,`) allows none. |
 
 If the binary can't be found, the routing tools are skipped (with a note on
 stderr) and the server still runs its other tools.

@@ -15,15 +15,46 @@ import (
 
 func TestChildEnv_ReplacesInstallationID(t *testing.T) {
 	base := []string{"GITHUB_APP_ID=1", "GITHUB_APP_INSTALLATION_ID=999", "PATH=/usr/bin"}
-	got := childEnv(base)
-	for _, kv := range got {
-		if strings.HasPrefix(kv, "GITHUB_APP_INSTALLATION_ID=") {
-			t.Errorf("childEnv should strip any inherited installation ID, found %q", kv)
-		}
+	got := childEnv(base, 42)
+
+	if countPrefix(got, "GITHUB_APP_INSTALLATION_ID=") != 1 {
+		t.Errorf("expected exactly one GITHUB_APP_INSTALLATION_ID, got %v", got)
+	}
+	if !contains(got, "GITHUB_APP_INSTALLATION_ID=42") {
+		t.Errorf("childEnv should set the installation ID to 42, got %v", got)
 	}
 	// The unrelated variables survive.
 	if !contains(got, "GITHUB_APP_ID=1") || !contains(got, "PATH=/usr/bin") {
 		t.Errorf("childEnv dropped unrelated variables: %v", got)
+	}
+}
+
+func TestChildEnv_StripsConflictingAuth(t *testing.T) {
+	base := []string{
+		"GITHUB_APP_ID=1",
+		"GITHUB_PERSONAL_ACCESS_TOKEN=ghp_secret",
+		"GITHUB_TOKEN=ghs_other",
+	}
+	got := childEnv(base, 7)
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "GITHUB_PERSONAL_ACCESS_TOKEN=") || strings.HasPrefix(kv, "GITHUB_TOKEN=") {
+			t.Errorf("childEnv should strip conflicting auth, found %q", kv)
+		}
+	}
+}
+
+func TestChildEnv_DerivesGitHubHostForEnterprise(t *testing.T) {
+	base := []string{"GITHUB_API_URL=https://ghe.example.com/api/v3"}
+	got := childEnv(base, 7)
+	if !contains(got, "GITHUB_HOST=https://ghe.example.com") {
+		t.Errorf("childEnv should derive GITHUB_HOST from GITHUB_API_URL, got %v", got)
+	}
+
+	// When GITHUB_HOST is already provided, it is not overridden.
+	base = []string{"GITHUB_API_URL=https://ghe.example.com/api/v3", "GITHUB_HOST=https://other.example.com"}
+	got = childEnv(base, 7)
+	if countPrefix(got, "GITHUB_HOST=") != 1 || !contains(got, "GITHUB_HOST=https://other.example.com") {
+		t.Errorf("childEnv should not override an explicit GITHUB_HOST, got %v", got)
 	}
 }
 
@@ -34,6 +65,16 @@ func contains(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func countPrefix(ss []string, prefix string) int {
+	n := 0
+	for _, s := range ss {
+		if strings.HasPrefix(s, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 // buildFakeServer compiles the testdata fake github-mcp-server and returns its

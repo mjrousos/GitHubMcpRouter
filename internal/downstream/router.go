@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/mjrousos/GitHubMcpRouter/internal/githubapp"
 )
 
 // OwnerClient pairs an owner (organization or user login) with the caller for
@@ -61,26 +64,44 @@ func (r *Router) ClientForOwner(ctx context.Context, owner string) (ToolCaller, 
 	if err != nil {
 		return nil, err
 	}
-	return r.manager.caller(inst.ID)
+	return r.manager.caller(ctx, inst.ID)
 }
 
-// AllClients returns a caller for every allowed installation. It is best-effort:
-// installations whose child fails to start are omitted and described in the
-// returned error, which is non-nil only when at least one failed to start.
+// AllClients returns a caller for every allowed installation. Children are
+// started concurrently. It is best-effort: installations whose child fails to
+// start are omitted and described in the returned error, which is non-nil only
+// when at least one failed to start.
 func (r *Router) AllClients(ctx context.Context) ([]OwnerClient, error) {
 	installations, err := r.dir.all(ctx)
 	if err != nil {
 		return nil, err
 	}
-	clients := make([]OwnerClient, 0, len(installations))
+
+	type result struct {
+		owner  string
+		caller ToolCaller
+		err    error
+	}
+	results := make([]result, len(installations))
+	var wg sync.WaitGroup
+	for i, inst := range installations {
+		wg.Add(1)
+		go func(i int, inst githubapp.Installation) {
+			defer wg.Done()
+			caller, err := r.manager.caller(ctx, inst.ID)
+			results[i] = result{owner: inst.Account, caller: caller, err: err}
+		}(i, inst)
+	}
+	wg.Wait()
+
+	clients := make([]OwnerClient, 0, len(results))
 	var errs []error
-	for _, inst := range installations {
-		caller, err := r.manager.caller(inst.ID)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", inst.Account, err))
+	for _, res := range results {
+		if res.err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", res.owner, res.err))
 			continue
 		}
-		clients = append(clients, OwnerClient{Owner: inst.Account, Caller: caller})
+		clients = append(clients, OwnerClient{Owner: res.owner, Caller: res.caller})
 	}
 	return clients, errors.Join(errs...)
 }

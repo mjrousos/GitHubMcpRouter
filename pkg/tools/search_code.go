@@ -21,7 +21,7 @@ import (
 func AddSearchCode(server *mcp.Server, router fanoutRouter) {
 	server.AddTool(&mcp.Tool{
 		Name:        "search_code",
-		Description: "Search for code across all connected GitHub organizations and combine the results.",
+		Description: "Search for code across all connected GitHub organizations and combine the results. Note: because results are gathered from each organization independently, `sort`/`order` and `page`/`perPage` apply per-organization, not to the merged result.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
