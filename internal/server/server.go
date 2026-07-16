@@ -10,6 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/mjrousos/GitHubMcpRouter/internal/downstream"
 	"github.com/mjrousos/GitHubMcpRouter/internal/githubapp"
 	"github.com/mjrousos/GitHubMcpRouter/pkg/tools"
 )
@@ -23,6 +24,12 @@ type Config struct {
 	// when nil, the server runs without GitHub access. RunStdio populates it
 	// from the environment when it is not supplied.
 	Authenticator *githubapp.Authenticator
+
+	// Router delegates GitHub tool calls to per-organization github-mcp-server
+	// child processes. It is optional: when nil, the GitHub organization tools
+	// are not registered. RunStdio populates it from the environment when it is
+	// not supplied.
+	Router *downstream.Router
 }
 
 // New builds an MCP server with all tools registered. It does not start any
@@ -39,6 +46,13 @@ func New(cfg Config) *mcp.Server {
 	// authenticate; without credentials they would fail on every call.
 	if cfg.Authenticator != nil {
 		tools.AddListInstallations(server, cfg.Authenticator)
+	}
+
+	// Register the organization-routing tools only when a router is available
+	// (GitHub App auth configured and the github-mcp-server binary found).
+	if cfg.Router != nil {
+		tools.AddGetFileContents(server, cfg.Router)
+		tools.AddSearchCode(server, cfg.Router)
 	}
 
 	return server
@@ -58,6 +72,13 @@ func RunStdio(cfg Config) error {
 		cfg.Authenticator = auth
 	}
 
+	if cfg.Router == nil && cfg.Authenticator != nil {
+		if router := buildRouterFromEnv(cfg.Authenticator, cfg.Version); router != nil {
+			cfg.Router = router
+			defer func() { _ = router.Close() }()
+		}
+	}
+
 	server := New(cfg)
 
 	fmt.Fprintln(os.Stderr, "MCP Router running on stdio")
@@ -66,6 +87,26 @@ func RunStdio(cfg Config) error {
 		return fmt.Errorf("error running server: %w", err)
 	}
 	return nil
+}
+
+// buildRouterFromEnv constructs the organization router from environment
+// variables. It returns nil (and logs) when the github-mcp-server binary cannot
+// be found, so the server still runs with its other tools.
+func buildRouterFromEnv(auth *githubapp.Authenticator, version string) *downstream.Router {
+	binary, err := downstream.ResolveBinary()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "GitHub organization routing disabled: %v\n", err)
+		return nil
+	}
+	router := downstream.New(downstream.Config{
+		Lister:      auth,
+		AllowedOrgs: os.Getenv(downstream.EnvAllowedOrgs),
+		BinaryPath:  binary,
+		BaseEnv:     os.Environ(),
+		Version:     version,
+	})
+	fmt.Fprintf(os.Stderr, "GitHub organization routing enabled (github-mcp-server: %s)\n", binary)
+	return router
 }
 
 // loadAuthenticatorFromEnv builds a GitHub App authenticator from environment

@@ -11,6 +11,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/mjrousos/GitHubMcpRouter/internal/downstream"
 	"github.com/mjrousos/GitHubMcpRouter/internal/githubapp"
 )
 
@@ -98,24 +99,6 @@ func TestNewEchoEndToEnd(t *testing.T) {
 	}
 }
 
-func TestNewRegistersInstallationsToolWhenAuthenticated(t *testing.T) {
-	cs, ctx := newClientFor(t, Config{Version: "test", Authenticator: testAuthenticator(t)})
-
-	res, err := cs.ListTools(ctx, nil)
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-
-	names := make([]string, 0, len(res.Tools))
-	for _, tool := range res.Tools {
-		names = append(names, tool.Name)
-	}
-
-	if !slices.Contains(names, "echo") || !slices.Contains(names, "list_installations") {
-		t.Errorf("expected both echo and list_installations to be registered, got %v", names)
-	}
-}
-
 // testAuthenticator builds an Authenticator with a freshly generated key. It
 // never contacts GitHub, so it is only useful for wiring/registration checks.
 func testAuthenticator(t *testing.T) *githubapp.Authenticator {
@@ -133,4 +116,50 @@ func testAuthenticator(t *testing.T) *githubapp.Authenticator {
 		t.Fatalf("New: %v", err)
 	}
 	return auth
+}
+
+func toolNames(res *mcp.ListToolsResult) []string {
+	names := make([]string, 0, len(res.Tools))
+	for _, tool := range res.Tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+func TestNewRegistersInstallationsToolWhenAuthenticated(t *testing.T) {
+	cs, ctx := newClientFor(t, Config{Version: "test", Authenticator: testAuthenticator(t)})
+
+	res, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	names := toolNames(res)
+	if !slices.Contains(names, "echo") || !slices.Contains(names, "list_installations") {
+		t.Errorf("expected both echo and list_installations to be registered, got %v", names)
+	}
+}
+
+func TestNewRegistersRouterToolsWhenPresent(t *testing.T) {
+	auth := testAuthenticator(t)
+	router := downstream.New(downstream.Config{
+		Lister:     auth,
+		BinaryPath: "github-mcp-server",
+		Version:    "test",
+	})
+	t.Cleanup(func() { _ = router.Close() })
+
+	cs, ctx := newClientFor(t, Config{Version: "test", Authenticator: auth, Router: router})
+
+	res, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	names := toolNames(res)
+	for _, want := range []string{"echo", "list_installations", "get_file_contents", "search_code"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("tool %q not registered; got %v", want, names)
+		}
+	}
 }
