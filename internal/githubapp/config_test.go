@@ -84,6 +84,29 @@ func TestLoadConfigFromEnv_Errors(t *testing.T) {
 		}
 	})
 
+	t.Run("non-positive app id", func(t *testing.T) {
+		for _, id := range []string{"0", "-5"} {
+			setEnv(t, id, "", "PEM", "")
+			if _, err := LoadConfigFromEnv(); err == nil {
+				t.Errorf("expected error for app ID %q", id)
+			}
+		}
+	})
+
+	t.Run("insecure api url", func(t *testing.T) {
+		setEnv(t, "123", "", "PEM", "http://ghe.example.com/api/v3")
+		if _, err := LoadConfigFromEnv(); err == nil {
+			t.Fatal("expected error for non-https GITHUB_API_URL")
+		}
+	})
+
+	t.Run("malformed api url", func(t *testing.T) {
+		setEnv(t, "123", "", "PEM", "https://ghe.example.com/api/v3?token=leak")
+		if _, err := LoadConfigFromEnv(); err == nil {
+			t.Fatal("expected error for GITHUB_API_URL with a query string")
+		}
+	})
+
 	t.Run("missing key", func(t *testing.T) {
 		setEnv(t, "123", "", "", "")
 		if _, err := LoadConfigFromEnv(); err == nil {

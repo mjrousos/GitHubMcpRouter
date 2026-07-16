@@ -6,14 +6,18 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/golang-jwt/jwt/v4"
 )
 
@@ -41,6 +45,8 @@ type fakeGitHub struct {
 	*httptest.Server
 	pub *rsa.PublicKey
 
+	tokenDelay time.Duration // artificial delay before minting tokens
+
 	mu               sync.Mutex
 	tokenCalls       map[int64]int // installation id -> POST access_tokens count
 	dataAuthHeader   string        // Authorization seen on the data endpoint
@@ -52,7 +58,11 @@ func newFakeGitHub(t *testing.T, pub *rsa.PublicKey) *fakeGitHub {
 	f := &fakeGitHub{pub: pub, tokenCalls: map[int64]int{}}
 
 	// installation resolution: owner/org/user -> installation id (or 404).
-	repoInstalls := map[string]int64{"octo-org/hello": 456}
+	repoInstalls := map[string]int64{
+		"octo-org/hello": 456,
+		"boom-org/boom":  999, // token minting returns 500
+		"slow-org/slow":  888, // token minting is delayed
+	}
 	orgInstalls := map[string]int64{"octo-org": 789}
 	userInstalls := map[string]int64{"octocat": 321}
 
@@ -96,6 +106,15 @@ func newFakeGitHub(t *testing.T, pub *rsa.PublicKey) *fakeGitHub {
 		f.mu.Lock()
 		f.tokenCalls[id]++
 		f.mu.Unlock()
+		switch id {
+		case 999:
+			http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+			return
+		case 888:
+			if f.tokenDelay > 0 {
+				time.Sleep(f.tokenDelay)
+			}
+		}
 		expires := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 		writeJSON(w, http.StatusCreated, fmt.Sprintf(
 			`{"token":"ghs_token_%d","expires_at":%q,"permissions":{"contents":"read"}}`, id, expires))
@@ -186,10 +205,15 @@ func writeJSON(w http.ResponseWriter, status int, body string) {
 
 func newTestAuthenticator(t *testing.T) (*Authenticator, *fakeGitHub) {
 	t.Helper()
+	return newTestAuthenticatorWithTimeout(t, 0)
+}
+
+func newTestAuthenticatorWithTimeout(t *testing.T, timeout time.Duration) (*Authenticator, *fakeGitHub) {
+	t.Helper()
 	key, pemBytes := testKey(t)
 	fake := newFakeGitHub(t, &key.PublicKey)
 
-	auth, err := New(Config{AppID: testAppID, PrivateKey: pemBytes, APIBaseURL: fake.URL})
+	auth, err := New(Config{AppID: testAppID, PrivateKey: pemBytes, APIBaseURL: fake.URL, Timeout: timeout})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -278,5 +302,113 @@ func TestAuthenticator_Installations(t *testing.T) {
 	}
 	if insts[1] != (Installation{ID: 321, Account: "octocat", AccountType: "User", RepositorySelection: "selected"}) {
 		t.Errorf("insts[1] = %+v", insts[1])
+	}
+}
+
+func TestAuthenticator_TokenMintFailure(t *testing.T) {
+	auth, _ := newTestAuthenticator(t)
+
+	// Installation 999's token endpoint returns 500; ghinstallation surfaces an
+	// *HTTPError, which must propagate as an error.
+	if _, err := auth.RepositoryToken(context.Background(), "boom-org", "boom"); err == nil {
+		t.Fatal("expected an error when token minting fails")
+	}
+}
+
+func TestAuthenticator_TokenMintTimeout(t *testing.T) {
+	auth, fake := newTestAuthenticatorWithTimeout(t, 100*time.Millisecond)
+	fake.tokenDelay = 750 * time.Millisecond
+
+	_, err := auth.RepositoryToken(context.Background(), "slow-org", "slow")
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestAuthenticator_ConcurrentTokens(t *testing.T) {
+	auth, _ := newTestAuthenticator(t)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 40)
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := auth.RepositoryToken(context.Background(), "octo-org", "hello"); err != nil {
+				errCh <- err
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := auth.OrganizationToken(context.Background(), "octo-org"); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent token error: %v", err)
+	}
+}
+
+func TestAuthenticator_RefusesCrossHostRedirect(t *testing.T) {
+	_, pemBytes := testKey(t)
+
+	// The secondary host records whether it ever receives an Authorization
+	// header — it must not, because the redirect should be refused first.
+	var leaked int32
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			atomic.AddInt32(&leaked, 1)
+		}
+		writeJSON(w, http.StatusOK, `{"id":1}`)
+	}))
+	t.Cleanup(secondary.Close)
+
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, secondary.URL+r.URL.Path, http.StatusFound)
+	}))
+	t.Cleanup(primary.Close)
+
+	auth, err := New(Config{AppID: testAppID, PrivateKey: pemBytes, APIBaseURL: primary.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := auth.RepositoryToken(context.Background(), "octo-org", "hello"); err == nil {
+		t.Fatal("expected the cross-host redirect to be refused")
+	}
+	if n := atomic.LoadInt32(&leaked); n != 0 {
+		t.Errorf("credentials were sent to the redirect target %d time(s)", n)
+	}
+}
+
+// trackingBody is an io.ReadCloser that records whether it was closed.
+type trackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *trackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestDrainAndCloseHTTPError(t *testing.T) {
+	body := &trackingBody{Reader: strings.NewReader("error body")}
+	httpErr := &ghinstallation.HTTPError{
+		Message:  "boom",
+		Response: &http.Response{Body: body},
+	}
+
+	// Wrapped, as the authenticator receives it.
+	drainAndCloseHTTPError(fmt.Errorf("minting token: %w", httpErr))
+
+	if !body.closed {
+		t.Error("expected the HTTPError response body to be closed")
 	}
 }

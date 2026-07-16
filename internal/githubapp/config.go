@@ -9,9 +9,11 @@ package githubapp
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Environment variables that configure GitHub App authentication.
@@ -33,6 +35,10 @@ type Config struct {
 	// APIBaseURL overrides the GitHub API base URL (for GitHub Enterprise
 	// Server). When empty, the public GitHub API is used.
 	APIBaseURL string
+
+	// Timeout bounds each outbound GitHub API request (including token
+	// refresh). When zero, a sensible default is used.
+	Timeout time.Duration
 }
 
 // LoadConfigFromEnv reads GitHub App configuration from environment variables.
@@ -60,6 +66,15 @@ func LoadConfigFromEnv() (*Config, error) {
 	appID, err := strconv.ParseInt(appIDRaw, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("%s must be a numeric GitHub App ID, got %q", EnvAppID, appIDRaw)
+	}
+	if appID <= 0 {
+		return nil, fmt.Errorf("%s must be a positive GitHub App ID, got %d", EnvAppID, appID)
+	}
+
+	if apiURL != "" {
+		if err := validateAPIURL(apiURL); err != nil {
+			return nil, err
+		}
 	}
 
 	privateKey, err := loadPrivateKey(keyPath, keyInline)
@@ -92,4 +107,25 @@ func loadPrivateKey(path, inline string) ([]byte, error) {
 		return []byte(inline), nil
 	}
 	return nil, fmt.Errorf("a private key is required: set %s (preferred) or %s", EnvPrivateKeyPath, EnvPrivateKey)
+}
+
+// validateAPIURL ensures a caller-supplied API base URL is safe to send
+// credentials to: an absolute HTTPS URL with a host and no userinfo, query, or
+// fragment. Requiring HTTPS prevents leaking app JWTs or installation tokens
+// over plaintext.
+func validateAPIURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL: %w", EnvAPIURL, err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("%s must be an https URL, got scheme %q", EnvAPIURL, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%s must include a host", EnvAPIURL)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%s must not include userinfo, a query, or a fragment", EnvAPIURL)
+	}
+	return nil
 }

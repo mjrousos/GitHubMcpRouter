@@ -61,7 +61,7 @@ refreshed automatically).
 | `GITHUB_APP_ID` | yes | Numeric GitHub App ID (used as the JWT issuer). |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | one of the two | Path to the app's PEM private key. **Preferred.** |
 | `GITHUB_APP_PRIVATE_KEY` | one of the two | The PEM private key contents (used only if `_PATH` is unset). |
-| `GITHUB_API_URL` | no | API base URL for GitHub Enterprise Server; defaults to the public API. |
+| `GITHUB_API_URL` | no | API base URL for GitHub Enterprise Server (must be an absolute `https` URL); defaults to the public API. |
 
 Behavior:
 
