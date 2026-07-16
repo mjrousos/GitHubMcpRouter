@@ -1,0 +1,10 @@
+# Normalize line endings to LF in the repository for all text files. This keeps
+# Go tooling (notably `gofmt -l`) consistent across platforms; without it a
+# Windows checkout (core.autocrlf=true) would rewrite files with CRLF.
+* text=auto eol=lf
+
+# Explicitly treat common binary types as binary so they are never converted.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
