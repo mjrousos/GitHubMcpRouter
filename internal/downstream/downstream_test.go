@@ -170,6 +170,26 @@ func TestDirectory_AllowList(t *testing.T) {
 	}
 }
 
+func TestDirectory_AllReturnsSortedInstallations(t *testing.T) {
+	lister := &fakeLister{}
+	lister.set(inst(1, "Zeta"), inst(2, "alpha"), inst(3, "Mike"))
+	dir := newDirectory(lister, nil)
+
+	all, err := dir.all(context.Background())
+	if err != nil {
+		t.Fatalf("all: %v", err)
+	}
+	want := []string{"alpha", "Mike", "Zeta"} // case-insensitive ascending
+	if len(all) != len(want) {
+		t.Fatalf("got %d installations, want %d", len(all), len(want))
+	}
+	for i := range want {
+		if all[i].Account != want[i] {
+			t.Errorf("all()[%d].Account = %q, want %q", i, all[i].Account, want[i])
+		}
+	}
+}
+
 func TestDirectory_MalformedAllowListDeniesAll(t *testing.T) {
 	lister := &fakeLister{}
 	lister.set(inst(456, "octo-org"))

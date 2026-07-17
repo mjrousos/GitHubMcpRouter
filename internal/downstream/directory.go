@@ -3,6 +3,7 @@ package downstream
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -106,10 +107,9 @@ func (d *directory) lookup(ctx context.Context, owner string) (githubapp.Install
 	if err := d.refresh(ctx); err != nil {
 		return githubapp.Installation{}, err
 	}
-	if byLogin, _ := d.snapshot(); true {
-		if inst, ok := byLogin[key]; ok {
-			return inst, nil
-		}
+	byLogin, _ := d.snapshot()
+	if inst, ok := byLogin[key]; ok {
+		return inst, nil
 	}
 
 	if d.allowed != nil {
@@ -140,5 +140,10 @@ func (d *directory) all(ctx context.Context) ([]githubapp.Installation, error) {
 	for _, inst := range byLogin {
 		out = append(out, inst)
 	}
+	// Sort for a deterministic order, so fan-out (spawn order) and merged
+	// search_code item ordering are stable between calls.
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Account) < strings.ToLower(out[j].Account)
+	})
 	return out, nil
 }
