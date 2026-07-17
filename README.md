@@ -1,8 +1,11 @@
 # GitHubMcpRouter
 
-A minimal [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server
-written in Go. It communicates exclusively over **stdio** and currently exposes a
-single `echo` tool. This is an early scaffold intended to grow over time.
+A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server written
+in Go. It communicates exclusively over **stdio**, authenticates to GitHub as a
+**GitHub App**, and acts as a multi-organization **router** in front of the
+official [github/github-mcp-server](https://github.com/github/github-mcp-server):
+it runs one github-mcp-server child process per installation and delegates each
+tool call to the right one (routing by owner, or fanning out across all orgs).
 
 The project structure follows the conventions of
 [github/github-mcp-server](https://github.com/github/github-mcp-server).
@@ -13,7 +16,8 @@ The project structure follows the conventions of
 cmd/mcp-router/      CLI entrypoint (cobra); defines the `stdio` subcommand
 internal/server/     Server construction and the stdio run loop
 internal/githubapp/  GitHub App authentication (JWT + installation tokens)
-pkg/tools/           MCP tool definitions (currently just `echo`)
+internal/downstream/ Per-org github-mcp-server process pool + routing
+pkg/tools/           MCP tool definitions
 ```
 
 ## Requirements
@@ -73,13 +77,53 @@ Behavior:
 
 ## Tools
 
-| Tool | Arguments | Description |
-| --- | --- | --- |
-| `echo` | `text` (string) | Returns the text upper-cased and prefixed `Message: `. |
-| `list_installations` | none | Lists the GitHub App's installations (ID + account). Requires GitHub App credentials. |
+| Tool | Arguments | Routing | Description |
+| --- | --- | --- | --- |
+| `echo` | `text` (string) | — | Returns the text upper-cased and prefixed `Message: `. |
+| `list_installations` | none | — | Lists the GitHub App's installations (ID + account). |
+| `get_file_contents` | `owner`\*, `repo`\*, `path`, `ref`, `sha` | by `owner` | Get a file/directory from a repo, routed to the owner's org. |
+| `search_code` | `query`\*, `sort`, `order`, `page`, `perPage` | fan-out | Search code across **all** connected orgs; results are merged. |
 
-`list_installations` is only registered when GitHub App credentials are
-configured (see [Authentication](#authentication)); `echo` is always available.
+`echo` is always available. `list_installations` requires GitHub App
+credentials. `get_file_contents` and `search_code` additionally require the
+`github-mcp-server` binary (see [Multi-organization routing](#multi-organization-routing)).
+Their input schemas mirror the identically named tools in the official
+github-mcp-server.
+
+## Multi-organization routing
+
+The official github-mcp-server authenticates as a **single** installation. To
+work across many organizations, this server runs one github-mcp-server child per
+installation and delegates:
+
+- **Owner-scoped tools** (e.g. `get_file_contents`) route to the child for the
+  request's `owner`.
+- **Non-owner-scoped tools** (e.g. `search_code`) fan out to every connected
+  child and the results are combined (best-effort: a failing org is reported but
+  doesn't fail the whole call).
+
+Children are spawned lazily, cached for the server's lifetime, and shut down on
+exit (a child that exits is evicted and re-spawned on the next call). Each child
+inherits this server's `GITHUB_APP_ID` / private-key env and receives its own
+`GITHUB_APP_INSTALLATION_ID`. Conflicting credentials
+(`GITHUB_PERSONAL_ACCESS_TOKEN`, `GITHUB_TOKEN`) are stripped so children always
+authenticate as the installation, and for GitHub Enterprise the child's
+`GITHUB_HOST` is derived from `GITHUB_API_URL`.
+
+Install the GitHub App-capable github-mcp-server and make sure it is on `PATH`
+(or point `GITHUB_MCP_SERVER_PATH` at it):
+
+```sh
+go install github.com/github/github-mcp-server/cmd/github-mcp-server@sammorrowdrums-github-app-s2s-auth
+```
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `GITHUB_MCP_SERVER_PATH` | no | Path to the `github-mcp-server` binary; defaults to looking it up on `PATH`. |
+| `GITHUB_APP_ALLOWED_ORGS` | no | Comma-separated org/user logins to delegate to. When unset (blank), every installation of the app is used; a non-blank but empty value (e.g. `,`) allows none. |
+
+If the binary can't be found, the routing tools are skipped (with a note on
+stderr) and the server still runs its other tools.
 
 ## Try it without an MCP host
 
