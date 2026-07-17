@@ -19,11 +19,11 @@ func main() {
 		Use:   "mcp-router",
 		Short: "Multi-organization GitHub MCP router",
 		Long: "An MCP server that routes GitHub tool calls across multiple organizations.\n\n" +
-			"When configured with GitHub App credentials, it wraps the official github-mcp-server:\n" +
-			"one github-mcp-server child process is run per installation, and each tool call is\n" +
-			"delegated to the right one (routed by owner, or fanned out across all organizations).\n" +
-			"Without credentials it still runs, exposing only the tools that don't need GitHub access.\n" +
-			"Communicates over stdio.",
+			"When configured with GitHub App credentials and the github-mcp-server binary, it wraps\n" +
+			"that server: one github-mcp-server child process is run per installation, and each tool\n" +
+			"call is delegated to the right one (routed by owner, or fanned out across all\n" +
+			"organizations). Without them it still runs, exposing only the tools that don't need\n" +
+			"GitHub routing. Communicates over stdio.",
 		Version: version,
 		// Don't print usage text when a command returns a runtime error
 		// (e.g. the transport closing); usage is only helpful for bad input.
