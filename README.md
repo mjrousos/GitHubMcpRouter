@@ -84,11 +84,11 @@ Behavior:
 | `get_file_contents` | `owner`\*, `repo`\*, `path`, `ref`, `sha` | by `owner` | Get a file/directory from a repo, routed to the owner's org. |
 | `search_code` | `query`\*, `sort`, `order`, `page`, `perPage` | fan-out | Search code across **all** connected orgs; results are merged. |
 
-`echo` is always available. `list_installations` requires GitHub App
-credentials. `get_file_contents` and `search_code` additionally require the
-`github-mcp-server` binary (see [Multi-organization routing](#multi-organization-routing)).
-Their input schemas mirror the identically named tools in the official
-github-mcp-server.
+`echo` is always available — it's a simple, credential-free liveness check.
+`list_installations` requires GitHub App credentials. `get_file_contents` and
+`search_code` additionally require the `github-mcp-server` binary (see
+[Multi-organization routing](#multi-organization-routing)). Their input schemas
+mirror the identically named tools in the official github-mcp-server.
 
 ## Multi-organization routing
 
@@ -165,15 +165,34 @@ none); the second one holds the transformed text:
 {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Message: HELLO FROM STDIN"}]}}
 ```
 
+This exercises `echo` only, so it needs no GitHub credentials — it's a quick way
+to confirm the server starts and speaks MCP. The GitHub tools require GitHub App
+credentials and the `github-mcp-server` binary as described above.
+
 ## Development
 
 ```sh
 go build ./...
 go vet ./...
+go test ./...
 ```
 
 ## Adding a tool
 
-1. Define the input struct and an `Add<Name>` function in a new file under
-   `pkg/tools/`.
+**A simple, self-contained tool** (like `echo`):
+
+1. Define the input struct and an `Add<Name>(server *mcp.Server)` function in a
+   new file under `pkg/tools/`.
 2. Register it from `internal/server/server.go` in `New`.
+
+**A GitHub tool that delegates to github-mcp-server** (like `get_file_contents`
+or `search_code`):
+
+1. Add an `Add<Name>(server, router)` function in `pkg/tools/` whose input
+   schema mirrors the identically named tool in the official github-mcp-server,
+   and forward the raw arguments to a downstream child.
+   - Owner-scoped tools resolve the child with `Router.ClientForOwner(owner)`.
+   - Non-owner-scoped tools fan out with `Router.AllClients()` and merge the
+     results.
+2. Register it from `internal/server/server.go` in `New`, guarded by
+   `cfg.Router != nil` so it only appears when routing is available.

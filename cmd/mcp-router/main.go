@@ -1,4 +1,5 @@
-// Command mcp-router is the entrypoint for the MCP Router server.
+// Command mcp-router is the entrypoint for the multi-organization GitHub MCP
+// router server.
 package main
 
 import (
@@ -15,9 +16,13 @@ var version = "dev"
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:     "mcp-router",
-		Short:   "MCP Router server",
-		Long:    "An MCP server. Currently exposes a single echo tool and communicates over stdio.",
+		Use:   "mcp-router",
+		Short: "Multi-organization GitHub MCP router",
+		Long: "An MCP server that routes GitHub tool calls across multiple organizations.\n\n" +
+			"It authenticates to GitHub as a GitHub App and wraps the official github-mcp-server:\n" +
+			"one github-mcp-server child process is run per installation, and each tool call is\n" +
+			"delegated to the right one (routed by owner, or fanned out across all organizations).\n" +
+			"Communicates over stdio.",
 		Version: version,
 		// Don't print usage text when a command returns a runtime error
 		// (e.g. the transport closing); usage is only helpful for bad input.
