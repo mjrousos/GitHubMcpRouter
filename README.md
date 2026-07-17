@@ -2,8 +2,9 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server written
 in Go. It communicates exclusively over **stdio** and, when configured with
-**GitHub App** credentials, acts as a multi-organization **router** in front of
-the official [github/github-mcp-server](https://github.com/github/github-mcp-server):
+**GitHub App** credentials and the `github-mcp-server` binary, acts as a
+multi-organization **router** in front of the official
+[github/github-mcp-server](https://github.com/github/github-mcp-server):
 it runs one `github-mcp-server` child process per installation and delegates each
 tool call to the right one (routing by owner, or fanning out across all orgs).
 
