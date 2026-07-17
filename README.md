@@ -88,7 +88,7 @@ Behavior:
 `list_installations` requires GitHub App credentials. `get_file_contents` and
 `search_code` additionally require the `github-mcp-server` binary (see
 [Multi-organization routing](#multi-organization-routing)). Their input schemas
-mirror the identically named tools in the official github-mcp-server.
+mirror the identically named tools in the official `github-mcp-server`.
 
 ## Multi-organization routing
 
