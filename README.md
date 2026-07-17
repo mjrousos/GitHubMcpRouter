@@ -1,10 +1,11 @@
 # GitHubMcpRouter
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server written
-in Go. It communicates exclusively over **stdio**, authenticates to GitHub as a
-**GitHub App**, and acts as a multi-organization **router** in front of the
-official [github/github-mcp-server](https://github.com/github/github-mcp-server):
-it runs one github-mcp-server child process per installation and delegates each
+in Go. It communicates exclusively over **stdio** and, when configured with
+**GitHub App** credentials and the `github-mcp-server` binary, acts as a
+multi-organization **router** in front of the official
+[github/github-mcp-server](https://github.com/github/github-mcp-server):
+it runs one `github-mcp-server` child process per installation and delegates each
 tool call to the right one (routing by owner, or fanning out across all orgs).
 
 The project structure follows the conventions of
@@ -84,16 +85,16 @@ Behavior:
 | `get_file_contents` | `owner`\*, `repo`\*, `path`, `ref`, `sha` | by `owner` | Get a file/directory from a repo, routed to the owner's org. |
 | `search_code` | `query`\*, `sort`, `order`, `page`, `perPage` | fan-out | Search code across **all** connected orgs; results are merged. |
 
-`echo` is always available. `list_installations` requires GitHub App
-credentials. `get_file_contents` and `search_code` additionally require the
-`github-mcp-server` binary (see [Multi-organization routing](#multi-organization-routing)).
-Their input schemas mirror the identically named tools in the official
-github-mcp-server.
+`echo` is always available — it's a simple, credential-free liveness check.
+`list_installations` requires GitHub App credentials. `get_file_contents` and
+`search_code` additionally require the `github-mcp-server` binary (see
+[Multi-organization routing](#multi-organization-routing)). Their input schemas
+mirror the identically named tools in the official `github-mcp-server`.
 
 ## Multi-organization routing
 
-The official github-mcp-server authenticates as a **single** installation. To
-work across many organizations, this server runs one github-mcp-server child per
+The official `github-mcp-server` authenticates as a **single** installation. To
+work across many organizations, this server runs one `github-mcp-server` child per
 installation and delegates:
 
 - **Owner-scoped tools** (e.g. `get_file_contents`) route to the child for the
@@ -110,7 +111,7 @@ inherits this server's `GITHUB_APP_ID` / private-key env and receives its own
 authenticate as the installation, and for GitHub Enterprise the child's
 `GITHUB_HOST` is derived from `GITHUB_API_URL`.
 
-Install the GitHub App-capable github-mcp-server and make sure it is on `PATH`
+Install the GitHub App-capable `github-mcp-server` and make sure it is on `PATH`
 (or point `GITHUB_MCP_SERVER_PATH` at it):
 
 ```sh
@@ -165,15 +166,35 @@ none); the second one holds the transformed text:
 {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Message: HELLO FROM STDIN"}]}}
 ```
 
+This exercises `echo` only, so it needs no GitHub credentials — it's a quick way
+to confirm the server starts and speaks MCP. `list_installations` requires GitHub
+App credentials, and the routed tools (`get_file_contents`, `search_code`)
+additionally require the `github-mcp-server` binary, as described above.
+
 ## Development
 
 ```sh
 go build ./...
 go vet ./...
+go test ./...
 ```
 
 ## Adding a tool
 
-1. Define the input struct and an `Add<Name>` function in a new file under
-   `pkg/tools/`.
+**A simple, self-contained tool** (like `echo`):
+
+1. Define the input struct and an `Add<Name>(server *mcp.Server)` function in a
+   new file under `pkg/tools/`.
 2. Register it from `internal/server/server.go` in `New`.
+
+**A GitHub tool that delegates to `github-mcp-server`** (like `get_file_contents`
+or `search_code`):
+
+1. Add an `Add<Name>(server, router)` function in `pkg/tools/` whose input
+   schema mirrors the identically named tool in the official `github-mcp-server`,
+   and forward the raw arguments to a downstream child.
+   - Owner-scoped tools resolve the child with `Router.ClientForOwner(owner)`.
+   - Non-owner-scoped tools fan out with `Router.AllClients()` and merge the
+     results.
+2. Register it from `internal/server/server.go` in `New`, guarded by
+   `cfg.Router != nil` so it only appears when routing is available.
