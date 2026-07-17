@@ -92,6 +92,9 @@ func TestHTTPTransportEndToEnd(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("echo returned an error: %+v", res.Content)
 	}
+	if len(res.Content) != 1 {
+		t.Fatalf("expected exactly 1 content item, got %d: %+v", len(res.Content), res.Content)
+	}
 	got, ok := res.Content[0].(*mcp.TextContent)
 	if !ok {
 		t.Fatalf("expected *mcp.TextContent, got %T", res.Content[0])
