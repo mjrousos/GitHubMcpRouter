@@ -23,7 +23,7 @@ func main() {
 			"that server: one github-mcp-server child process is run per installation, and each tool\n" +
 			"call is delegated to the right one (routed by owner, or fanned out across all\n" +
 			"organizations). Without them it still runs, exposing only the tools that don't need\n" +
-			"GitHub routing. Communicates over stdio.",
+			"GitHub routing. Communicates over stdio or HTTP (see the stdio and http subcommands).",
 		Version: version,
 		// Don't print usage text when a command returns a runtime error
 		// (e.g. the transport closing); usage is only helpful for bad input.
@@ -39,7 +39,23 @@ func main() {
 		},
 	}
 
+	httpCmd := &cobra.Command{
+		Use:   "http",
+		Short: "Start the MCP server over HTTP",
+		Long: "Start a server that communicates over the streamable HTTP transport.\n\n" +
+			"The MCP endpoint is served at " + server.MCPPath + " and a health check at /healthz.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			address, err := cmd.Flags().GetString("address")
+			if err != nil {
+				return err
+			}
+			return server.RunHTTP(server.Config{Version: version}, server.HTTPConfig{Address: address})
+		},
+	}
+	httpCmd.Flags().String("address", server.DefaultHTTPAddress, "TCP address to listen on (host:port)")
+
 	rootCmd.AddCommand(stdioCmd)
+	rootCmd.AddCommand(httpCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

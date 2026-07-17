@@ -12,3 +12,6 @@ bin/
 
 # macOS
 .DS_Store
+
+# Local run/redirect logs
+*.log
