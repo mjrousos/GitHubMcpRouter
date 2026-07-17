@@ -43,16 +43,31 @@ func main() {
 		Use:   "http",
 		Short: "Start the MCP server over HTTP",
 		Long: "Start a server that communicates over the streamable HTTP transport.\n\n" +
-			"The MCP endpoint is served at " + server.MCPPath + " and a health check at /healthz.",
+			"The MCP endpoint is served at " + server.MCPPath + " and a health check at /healthz.\n" +
+			"By default it binds to localhost; pass --address 0.0.0.0:PORT to expose it (only\n" +
+			"behind a trusted proxy or appropriate network controls).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			address, err := cmd.Flags().GetString("address")
 			if err != nil {
 				return err
 			}
-			return server.RunHTTP(server.Config{Version: version}, server.HTTPConfig{Address: address})
+			sessionTimeout, err := cmd.Flags().GetDuration("session-timeout")
+			if err != nil {
+				return err
+			}
+			// On the CLI, 0 means "disable"; HTTPConfig uses a negative value for
+			// that (its zero value selects the default instead).
+			if sessionTimeout == 0 {
+				sessionTimeout = -1
+			}
+			return server.RunHTTP(server.Config{Version: version}, server.HTTPConfig{
+				Address:        address,
+				SessionTimeout: sessionTimeout,
+			})
 		},
 	}
 	httpCmd.Flags().String("address", server.DefaultHTTPAddress, "TCP address to listen on (host:port)")
+	httpCmd.Flags().Duration("session-timeout", server.DefaultSessionTimeout, "Close idle MCP sessions after this duration (0 to disable)")
 
 	rootCmd.AddCommand(stdioCmd)
 	rootCmd.AddCommand(httpCmd)

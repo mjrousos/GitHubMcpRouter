@@ -77,6 +77,18 @@ so networked MCP clients can connect. Start it with the `http` subcommand:
   environment variables as the stdio transport (see below); the transport only
   changes how clients connect.
 
+Hardening applied automatically: request bodies are size-limited, cross-origin
+requests are rejected (per the MCP spec's `Origin` validation), and idle
+sessions are closed after 30 minutes (`--session-timeout`, `0` to disable). The
+server shuts down gracefully on `SIGINT`/`SIGTERM`.
+
+Flags:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--address` | `localhost:8080` | TCP address to listen on (`host:port`). |
+| `--session-timeout` | `30m` | Close idle MCP sessions after this duration (`0` to disable). |
+
 Example MCP host configuration for an HTTP server:
 
 ```json

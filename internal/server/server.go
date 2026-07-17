@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -88,6 +89,15 @@ type HTTPConfig struct {
 	// Address is the TCP address to listen on, e.g. "localhost:8080". When
 	// empty, DefaultHTTPAddress is used.
 	Address string
+
+	// SessionTimeout closes idle MCP sessions after this duration, bounding
+	// resource use from clients that disconnect without cleaning up. When zero,
+	// DefaultSessionTimeout is used; a negative value disables the timeout.
+	SessionTimeout time.Duration
+
+	// MaxRequestBytes caps the size of a request body accepted at the MCP
+	// endpoint. When zero, DefaultMaxRequestBytes is used.
+	MaxRequestBytes int64
 }
 
 // DefaultHTTPAddress is the address the HTTP transport listens on when none is
@@ -98,9 +108,27 @@ const DefaultHTTPAddress = "localhost:8080"
 // MCPPath is the HTTP path that serves the MCP endpoint.
 const MCPPath = "/mcp"
 
-// httpShutdownTimeout bounds how long we wait for in-flight requests to finish
-// during a graceful shutdown.
-const httpShutdownTimeout = 10 * time.Second
+// Defaults for the HTTP transport.
+const (
+	// httpShutdownTimeout bounds how long we wait for in-flight requests to
+	// finish during a graceful shutdown.
+	httpShutdownTimeout = 10 * time.Second
+
+	// DefaultSessionTimeout closes MCP sessions that receive no requests for
+	// this long, so abandoned sessions don't accumulate.
+	DefaultSessionTimeout = 30 * time.Minute
+
+	// DefaultMaxRequestBytes bounds request bodies at the MCP endpoint.
+	DefaultMaxRequestBytes = 4 << 20 // 4 MiB
+
+	// httpReadTimeout bounds how long a client may take to send a request
+	// (headers + body). It does not limit the response, so long-lived SSE
+	// streams are unaffected.
+	httpReadTimeout = 30 * time.Second
+
+	// httpIdleTimeout bounds how long an idle keep-alive connection is kept.
+	httpIdleTimeout = 120 * time.Second
+)
 
 // RunHTTP builds the server and serves it over the streamable HTTP transport
 // until the context is cancelled or the process receives an interrupt. The MCP
@@ -116,9 +144,37 @@ func RunHTTP(cfg Config, httpCfg HTTPConfig) error {
 	}
 	defer cleanup()
 
+	httpServer := newHTTPServer(ctx, cfg, httpCfg)
+
+	listener, err := net.Listen("tcp", httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("listening on %s: %w", httpServer.Addr, err)
+	}
+
+	fmt.Fprintf(os.Stderr, "MCP Router listening on http://%s%s\n", httpServer.Addr, MCPPath)
+
+	return serveHTTP(ctx, httpServer, listener)
+}
+
+// newHTTPServer builds the *http.Server that serves the MCP endpoint and health
+// check. Request contexts derive from ctx (via BaseContext) so that cancelling
+// ctx unblocks long-lived SSE handlers and lets a graceful shutdown complete
+// promptly. The returned server is not yet listening.
+func newHTTPServer(ctx context.Context, cfg Config, httpCfg HTTPConfig) *http.Server {
 	address := httpCfg.Address
 	if address == "" {
 		address = DefaultHTTPAddress
+	}
+	sessionTimeout := httpCfg.SessionTimeout
+	if sessionTimeout == 0 {
+		sessionTimeout = DefaultSessionTimeout
+	}
+	if sessionTimeout < 0 {
+		sessionTimeout = 0 // negative disables the SDK's idle-session timeout
+	}
+	maxBytes := httpCfg.MaxRequestBytes
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxRequestBytes
 	}
 
 	// A single server backs every session; the SDK permits returning the same
@@ -126,40 +182,61 @@ func RunHTTP(cfg Config, httpCfg HTTPConfig) error {
 	server := New(cfg)
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
-	}, nil)
+	}, &mcp.StreamableHTTPOptions{
+		SessionTimeout: sessionTimeout,
+	})
+	// Bound request bodies, then apply cross-origin protection (the MCP spec
+	// requires validating the Origin of incoming connections).
+	endpoint := http.NewCrossOriginProtection().Handler(maxBytesHandler(mcpHandler, maxBytes))
 
 	mux := http.NewServeMux()
-	mux.Handle(MCPPath, mcpHandler)
-	mux.Handle(MCPPath+"/", mcpHandler)
+	mux.Handle(MCPPath, endpoint)
+	mux.Handle(MCPPath+"/", endpoint)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
-	httpServer := &http.Server{
+	return &http.Server{
 		Addr:              address,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       httpReadTimeout,
+		IdleTimeout:       httpIdleTimeout,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
+}
 
-	// Trigger a graceful shutdown when the context is cancelled (signal).
+// serveHTTP serves srv on ln until ctx is cancelled, then gracefully shuts it
+// down. It returns the first error from serving or shutting down.
+func serveHTTP(ctx context.Context, srv *http.Server, ln net.Listener) error {
 	shutdownErr := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 		defer cancel()
-		shutdownErr <- httpServer.Shutdown(shutdownCtx)
+		shutdownErr <- srv.Shutdown(shutdownCtx)
 	}()
 
-	fmt.Fprintf(os.Stderr, "MCP Router listening on http://%s%s\n", address, MCPPath)
-
-	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("error running HTTP server: %w", err)
 	}
 	if err := <-shutdownErr; err != nil {
 		return fmt.Errorf("error shutting down HTTP server: %w", err)
 	}
 	return nil
+}
+
+// maxBytesHandler limits the request body to limit bytes before delegating to
+// next. A GET (e.g. the standalone SSE stream) carries no body, so this is a
+// no-op for those requests.
+func maxBytesHandler(next http.Handler, limit int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // prepareFromEnv fills in the Authenticator and Router from the environment when
