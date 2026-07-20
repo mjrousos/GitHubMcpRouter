@@ -1,7 +1,7 @@
 # GitHubMcpRouter
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server written
-in Go. It communicates exclusively over **stdio** and, when configured with
+in Go. It speaks MCP over **stdio** or **HTTP** and, when configured with
 **GitHub App** credentials and the `github-mcp-server` binary, acts as a
 multi-organization **router** in front of the official
 [github/github-mcp-server](https://github.com/github/github-mcp-server):
@@ -14,8 +14,8 @@ The project structure follows the conventions of
 ## Layout
 
 ```
-cmd/mcp-router/      CLI entrypoint (cobra); defines the `stdio` subcommand
-internal/server/     Server construction and the stdio run loop
+cmd/mcp-router/      CLI entrypoint (cobra); defines the `stdio` and `http` subcommands
+internal/server/     Server construction and the stdio / HTTP run loops
 internal/githubapp/  GitHub App authentication (JWT + installation tokens)
 internal/downstream/ Per-org github-mcp-server process pool + routing
 pkg/tools/           MCP tool definitions
@@ -33,7 +33,12 @@ go build -o bin/mcp-router ./cmd/mcp-router
 
 ## Run
 
-The server speaks JSON-RPC over standard input/output:
+The server supports two transports: **stdio** (default for MCP hosts) and
+**HTTP** (streamable HTTP, for network clients).
+
+### stdio
+
+Communicates using JSON-RPC over standard input/output:
 
 ```sh
 ./bin/mcp-router stdio
@@ -51,6 +56,56 @@ interactively. Example host configuration:
     }
   }
 }
+```
+
+### HTTP
+
+Serves the [streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
+so networked MCP clients can connect. Start it with the `http` subcommand:
+
+```sh
+./bin/mcp-router http                          # listens on localhost:8080
+./bin/mcp-router http --address localhost:9000 # custom host:port
+```
+
+- The MCP endpoint is served at **`/mcp`** (e.g. `http://localhost:8080/mcp`).
+- A plain-text health check is served at **`/healthz`**.
+- By default it binds to `localhost`, so it is not exposed on the network. Set
+  `--address 0.0.0.0:8080` to listen on all interfaces (only do this behind a
+  trusted proxy / with appropriate network controls).
+- The GitHub App credentials and routing configuration are read from the same
+  environment variables as the stdio transport (see below); the transport only
+  changes how clients connect.
+
+Hardening applied automatically: request bodies are size-limited, cross-origin
+requests are rejected (per the MCP spec's `Origin` validation), and idle
+sessions are closed after 30 minutes (`--session-timeout`, `0` to disable). The
+server shuts down gracefully on `SIGINT`/`SIGTERM`.
+
+Flags:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--address` | `localhost:8080` | TCP address to listen on (`host:port`). |
+| `--session-timeout` | `30m` | Close idle MCP sessions after this duration (`0` to disable). |
+
+Example MCP host configuration for an HTTP server:
+
+```json
+{
+  "servers": {
+    "mcp-router": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
+```
+
+Quick manual check that it's up:
+
+```sh
+curl http://localhost:8080/healthz
 ```
 
 ## Authentication
