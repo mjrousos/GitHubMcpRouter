@@ -108,7 +108,8 @@ func TestHTTPTransportEndToEnd(t *testing.T) {
 func TestHTTPHealthEndpoint(t *testing.T) {
 	baseURL, _, _ := startTestHTTPServer(t, Config{Version: "http-test"})
 
-	resp, err := http.Get(baseURL + "/healthz")
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(baseURL + "/healthz")
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
