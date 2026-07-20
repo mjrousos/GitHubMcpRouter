@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -258,16 +259,22 @@ func maxBytesHandler(next http.Handler, limit int64) http.Handler {
 func (cfg *Config) prepareFromEnv() (func(), error) {
 	cleanup := func() {}
 
+	// ghCfg is the GitHub App configuration loaded from the environment (nil
+	// when the Authenticator was supplied externally or auth is unconfigured).
+	// It carries the resolved app ID and private key used to give spawned
+	// children canonical credentials when the operator used the aliases.
+	var ghCfg *githubapp.Config
 	if cfg.Authenticator == nil {
-		auth, err := loadAuthenticatorFromEnv()
+		auth, loaded, err := loadAuthenticatorFromEnv()
 		if err != nil {
 			return cleanup, err
 		}
 		cfg.Authenticator = auth
+		ghCfg = loaded
 	}
 
 	if cfg.Router == nil && cfg.Authenticator != nil {
-		if router := buildRouterFromEnv(cfg.Authenticator, cfg.Version); router != nil {
+		if router := buildRouterFromEnv(cfg.Authenticator, ghCfg, cfg.Version); router != nil {
 			cfg.Router = router
 			cleanup = func() { _ = router.Close() }
 		}
@@ -278,8 +285,9 @@ func (cfg *Config) prepareFromEnv() (func(), error) {
 
 // buildRouterFromEnv constructs the organization router from environment
 // variables. It returns nil (and logs) when the github-mcp-server binary cannot
-// be found, so the server still runs with its other tools.
-func buildRouterFromEnv(auth *githubapp.Authenticator, version string) *downstream.Router {
+// be found, so the server still runs with its other tools. ghCfg, when non-nil,
+// is used to give children canonical GitHub App credentials.
+func buildRouterFromEnv(auth *githubapp.Authenticator, ghCfg *githubapp.Config, version string) *downstream.Router {
 	binary, err := downstream.ResolveBinary()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "GitHub organization routing disabled: %v\n", err)
@@ -289,30 +297,68 @@ func buildRouterFromEnv(auth *githubapp.Authenticator, version string) *downstre
 		Lister:      auth,
 		AllowedOrgs: os.Getenv(downstream.EnvAllowedOrgs),
 		BinaryPath:  binary,
-		BaseEnv:     os.Environ(),
+		BaseEnv:     childBaseEnv(os.Environ(), ghCfg),
 		Version:     version,
 	})
 	fmt.Fprintf(os.Stderr, "GitHub organization routing enabled (github-mcp-server: %s)\n", binary)
 	return router
 }
 
+// childBaseEnv augments env with the canonical GitHub App variables that spawned
+// github-mcp-server children expect (GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY),
+// when they are not already present. This lets the routed tools authenticate
+// even when the router itself was configured via the MCP_ROUTER_* aliases, which
+// only this router understands. Existing canonical values are never overwritten.
+func childBaseEnv(env []string, ghCfg *githubapp.Config) []string {
+	if ghCfg == nil {
+		return env
+	}
+	if !envHas(env, githubapp.EnvAppID) {
+		env = append(env, fmt.Sprintf("%s=%d", githubapp.EnvAppID, ghCfg.AppID))
+		fmt.Fprintf(os.Stderr, "Propagating %s to github-mcp-server children (resolved from %s)\n",
+			githubapp.EnvAppID, ghCfg.AppIDSource)
+	}
+	// The child accepts the key via a path or inline; only inject the inline
+	// form when neither canonical variable is already set.
+	if !envHas(env, githubapp.EnvPrivateKeyPath) && !envHas(env, githubapp.EnvPrivateKey) {
+		env = append(env, githubapp.EnvPrivateKey+"="+string(ghCfg.PrivateKey))
+		fmt.Fprintf(os.Stderr, "Propagating %s to github-mcp-server children (resolved from %s)\n",
+			githubapp.EnvPrivateKey, ghCfg.PrivateKeySource)
+	}
+	return env
+}
+
+// envHas reports whether env contains a non-empty assignment for key (in
+// "KEY=VALUE" form).
+func envHas(env []string, key string) bool {
+	prefix := key + "="
+	for _, kv := range env {
+		if value, ok := strings.CutPrefix(kv, prefix); ok && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // loadAuthenticatorFromEnv builds a GitHub App authenticator from environment
 // variables. It returns a nil authenticator (and logs) when GitHub App
-// credentials are not configured, so the server can still run.
-func loadAuthenticatorFromEnv() (*githubapp.Authenticator, error) {
+// credentials are not configured, so the server can still run. It also returns
+// the loaded configuration (nil when unconfigured) for downstream propagation.
+func loadAuthenticatorFromEnv() (*githubapp.Authenticator, *githubapp.Config, error) {
 	ghCfg, err := githubapp.LoadConfigFromEnv()
 	if err != nil {
-		return nil, fmt.Errorf("loading GitHub App configuration: %w", err)
+		return nil, nil, fmt.Errorf("loading GitHub App configuration: %w", err)
 	}
 	if ghCfg == nil {
 		fmt.Fprintln(os.Stderr, "GitHub App authentication not configured; GitHub tools will be unavailable")
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	auth, err := githubapp.New(*ghCfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	fmt.Fprintf(os.Stderr, "GitHub App authentication enabled (app ID %d)\n", auth.AppID())
-	return auth, nil
+	fmt.Fprintf(os.Stderr, "GitHub App authentication enabled (app ID %d from %s, private key from %s)\n",
+		auth.AppID(), ghCfg.AppIDSource, ghCfg.PrivateKeySource)
+	return auth, ghCfg, nil
 }

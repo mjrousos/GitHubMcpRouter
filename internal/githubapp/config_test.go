@@ -9,11 +9,15 @@ import (
 // setEnv sets all GitHub App environment variables for a test, using empty
 // strings for any that are not relevant. Empty values are treated as unset by
 // LoadConfigFromEnv, which also isolates the test from the host environment.
+// The MCP_ROUTER_ aliases are cleared here; tests that exercise them set them
+// explicitly.
 func setEnv(t *testing.T, appID, keyPath, keyInline, apiURL string) {
 	t.Helper()
 	t.Setenv(EnvAppID, appID)
+	t.Setenv(EnvAppIDAlias, "")
 	t.Setenv(EnvPrivateKeyPath, keyPath)
 	t.Setenv(EnvPrivateKey, keyInline)
+	t.Setenv(EnvPrivateKeyAlias, "")
 	t.Setenv(EnvAPIURL, apiURL)
 }
 
@@ -45,6 +49,65 @@ func TestLoadConfigFromEnv_InlineKey(t *testing.T) {
 	if string(cfg.PrivateKey) != "PEM-CONTENTS" {
 		t.Errorf("PrivateKey = %q, want %q", cfg.PrivateKey, "PEM-CONTENTS")
 	}
+	if cfg.AppIDSource != EnvAppID {
+		t.Errorf("AppIDSource = %q, want %q", cfg.AppIDSource, EnvAppID)
+	}
+	if cfg.PrivateKeySource != EnvPrivateKey {
+		t.Errorf("PrivateKeySource = %q, want %q", cfg.PrivateKeySource, EnvPrivateKey)
+	}
+}
+
+// TestLoadConfigFromEnv_Aliases verifies that the MCP_ROUTER_ aliases are used
+// when the GITHUB_ names are unset, and that the sources are reported.
+func TestLoadConfigFromEnv_Aliases(t *testing.T) {
+	setEnv(t, "", "", "", "")
+	t.Setenv(EnvAppIDAlias, "9001")
+	t.Setenv(EnvPrivateKeyAlias, "ALIAS-PEM")
+
+	cfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected a config")
+	}
+	if cfg.AppID != 9001 {
+		t.Errorf("AppID = %d, want 9001", cfg.AppID)
+	}
+	if string(cfg.PrivateKey) != "ALIAS-PEM" {
+		t.Errorf("PrivateKey = %q, want %q", cfg.PrivateKey, "ALIAS-PEM")
+	}
+	if cfg.AppIDSource != EnvAppIDAlias {
+		t.Errorf("AppIDSource = %q, want %q", cfg.AppIDSource, EnvAppIDAlias)
+	}
+	if cfg.PrivateKeySource != EnvPrivateKeyAlias {
+		t.Errorf("PrivateKeySource = %q, want %q", cfg.PrivateKeySource, EnvPrivateKeyAlias)
+	}
+}
+
+// TestLoadConfigFromEnv_PrimaryPreferredOverAlias verifies that when both a
+// primary (GITHUB_) variable and its alias are set, the primary wins.
+func TestLoadConfigFromEnv_PrimaryPreferredOverAlias(t *testing.T) {
+	setEnv(t, "111", "", "PRIMARY-PEM", "")
+	t.Setenv(EnvAppIDAlias, "222")
+	t.Setenv(EnvPrivateKeyAlias, "ALIAS-PEM")
+
+	cfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AppID != 111 {
+		t.Errorf("AppID = %d, want 111 (GITHUB_APP_ID should win)", cfg.AppID)
+	}
+	if cfg.AppIDSource != EnvAppID {
+		t.Errorf("AppIDSource = %q, want %q", cfg.AppIDSource, EnvAppID)
+	}
+	if string(cfg.PrivateKey) != "PRIMARY-PEM" {
+		t.Errorf("PrivateKey = %q, want %q", cfg.PrivateKey, "PRIMARY-PEM")
+	}
+	if cfg.PrivateKeySource != EnvPrivateKey {
+		t.Errorf("PrivateKeySource = %q, want %q", cfg.PrivateKeySource, EnvPrivateKey)
+	}
 }
 
 func TestLoadConfigFromEnv_PathPreferredOverInline(t *testing.T) {
@@ -63,6 +126,9 @@ func TestLoadConfigFromEnv_PathPreferredOverInline(t *testing.T) {
 	}
 	if string(cfg.PrivateKey) != "FROM-FILE" {
 		t.Errorf("PrivateKey = %q, want file contents %q", cfg.PrivateKey, "FROM-FILE")
+	}
+	if cfg.PrivateKeySource != EnvPrivateKeyPath {
+		t.Errorf("PrivateKeySource = %q, want %q", cfg.PrivateKeySource, EnvPrivateKeyPath)
 	}
 	if cfg.APIBaseURL != "https://ghe.example.com/api/v3" {
 		t.Errorf("APIBaseURL = %q", cfg.APIBaseURL)

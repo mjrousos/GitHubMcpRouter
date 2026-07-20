@@ -17,11 +17,26 @@ import (
 )
 
 // Environment variables that configure GitHub App authentication.
+//
+// The app ID and inline private key each accept an MCP_ROUTER_-prefixed alias in
+// addition to the GITHUB_-prefixed name, so the server can be configured in
+// environments where the GITHUB_ names are reserved or otherwise unavailable.
+// When both a primary and its alias are set, the primary (GITHUB_) name wins.
 const (
-	EnvAppID          = "GITHUB_APP_ID"
-	EnvPrivateKeyPath = "GITHUB_APP_PRIVATE_KEY_PATH"
-	EnvPrivateKey     = "GITHUB_APP_PRIVATE_KEY"
-	EnvAPIURL         = "GITHUB_API_URL"
+	EnvAppID           = "GITHUB_APP_ID"
+	EnvAppIDAlias      = "MCP_ROUTER_APP_ID"
+	EnvPrivateKeyPath  = "GITHUB_APP_PRIVATE_KEY_PATH"
+	EnvPrivateKey      = "GITHUB_APP_PRIVATE_KEY"
+	EnvPrivateKeyAlias = "MCP_ROUTER_APP_PRIVATE_KEY"
+	EnvAPIURL          = "GITHUB_API_URL"
+)
+
+// appIDEnvVars and privateKeyEnvVars list the accepted environment variable
+// names for the app ID and the inline private key, in precedence order. The
+// first that is set wins.
+var (
+	appIDEnvVars      = []string{EnvAppID, EnvAppIDAlias}
+	privateKeyEnvVars = []string{EnvPrivateKey, EnvPrivateKeyAlias}
 )
 
 // Config holds the settings needed to authenticate as a GitHub App.
@@ -39,6 +54,13 @@ type Config struct {
 	// Timeout bounds each outbound GitHub API request (including token
 	// refresh). When zero, a sensible default is used.
 	Timeout time.Duration
+
+	// AppIDSource and PrivateKeySource name the environment variables that
+	// supplied the app ID and private key, respectively. They are populated by
+	// LoadConfigFromEnv purely for diagnostics and are ignored when
+	// constructing an Authenticator.
+	AppIDSource      string
+	PrivateKeySource string
 }
 
 // LoadConfigFromEnv reads GitHub App configuration from environment variables.
@@ -47,28 +69,32 @@ type Config struct {
 // server can run without GitHub access. It returns an error when configuration
 // is partially present or invalid.
 //
-// The private key is read from GITHUB_APP_PRIVATE_KEY_PATH (preferred) or, if
-// that is unset, from GITHUB_APP_PRIVATE_KEY.
+// The app ID is read from GITHUB_APP_ID or, as an alias, MCP_ROUTER_APP_ID. The
+// private key is read from GITHUB_APP_PRIVATE_KEY_PATH (preferred) or, if that
+// is unset, the inline GITHUB_APP_PRIVATE_KEY or its alias
+// MCP_ROUTER_APP_PRIVATE_KEY. When both a primary and an alias are set, the
+// primary wins. Config.AppIDSource and Config.PrivateKeySource record which
+// variables were actually used.
 func LoadConfigFromEnv() (*Config, error) {
-	appIDRaw := strings.TrimSpace(os.Getenv(EnvAppID))
+	appIDRaw, appIDSource := lookupEnv(appIDEnvVars...)
 	keyPath := strings.TrimSpace(os.Getenv(EnvPrivateKeyPath))
-	keyInline := os.Getenv(EnvPrivateKey)
+	keyInline, keyInlineSource := lookupEnv(privateKeyEnvVars...)
 	apiURL := strings.TrimSpace(os.Getenv(EnvAPIURL))
 
 	// Nothing configured at all: GitHub App auth is simply disabled.
-	if appIDRaw == "" && keyPath == "" && strings.TrimSpace(keyInline) == "" {
+	if appIDRaw == "" && keyPath == "" && keyInline == "" {
 		return nil, nil
 	}
 
 	if appIDRaw == "" {
-		return nil, fmt.Errorf("%s must be set to authenticate as a GitHub App", EnvAppID)
+		return nil, fmt.Errorf("a GitHub App ID must be set (%s or %s) to authenticate as a GitHub App", EnvAppID, EnvAppIDAlias)
 	}
 	appID, err := strconv.ParseInt(appIDRaw, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("%s must be a numeric GitHub App ID, got %q", EnvAppID, appIDRaw)
+		return nil, fmt.Errorf("%s must be a numeric GitHub App ID, got %q", appIDSource, appIDRaw)
 	}
 	if appID <= 0 {
-		return nil, fmt.Errorf("%s must be a positive GitHub App ID, got %d", EnvAppID, appID)
+		return nil, fmt.Errorf("%s must be a positive GitHub App ID, got %d", appIDSource, appID)
 	}
 
 	if apiURL != "" {
@@ -77,36 +103,52 @@ func LoadConfigFromEnv() (*Config, error) {
 		}
 	}
 
-	privateKey, err := loadPrivateKey(keyPath, keyInline)
+	privateKey, keySource, err := loadPrivateKey(keyPath, keyInline, keyInlineSource)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Config{
-		AppID:      appID,
-		PrivateKey: privateKey,
-		APIBaseURL: apiURL,
+		AppID:            appID,
+		PrivateKey:       privateKey,
+		APIBaseURL:       apiURL,
+		AppIDSource:      appIDSource,
+		PrivateKeySource: keySource,
 	}, nil
+}
+
+// lookupEnv returns the value and name of the first environment variable among
+// names that is non-empty after trimming surrounding whitespace. The value is
+// returned untrimmed so exact contents (such as a PEM key) are preserved. When
+// none is set, it returns empty strings.
+func lookupEnv(names ...string) (value, source string) {
+	for _, name := range names {
+		if raw := os.Getenv(name); strings.TrimSpace(raw) != "" {
+			return raw, name
+		}
+	}
+	return "", ""
 }
 
 // loadPrivateKey resolves the private key, preferring the file path over the
 // inline value. When a path is set but cannot be read, it fails rather than
-// silently falling back to the inline value.
-func loadPrivateKey(path, inline string) ([]byte, error) {
+// silently falling back to the inline value. It returns the name of the
+// environment variable that supplied the key, for diagnostics.
+func loadPrivateKey(path, inline, inlineSource string) ([]byte, string, error) {
 	if path != "" {
 		key, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("reading %s (%q): %w", EnvPrivateKeyPath, path, err)
+			return nil, "", fmt.Errorf("reading %s (%q): %w", EnvPrivateKeyPath, path, err)
 		}
 		if strings.TrimSpace(string(key)) == "" {
-			return nil, fmt.Errorf("%s (%q) is empty", EnvPrivateKeyPath, path)
+			return nil, "", fmt.Errorf("%s (%q) is empty", EnvPrivateKeyPath, path)
 		}
-		return key, nil
+		return key, EnvPrivateKeyPath, nil
 	}
 	if strings.TrimSpace(inline) != "" {
-		return []byte(inline), nil
+		return []byte(inline), inlineSource, nil
 	}
-	return nil, fmt.Errorf("a private key is required: set %s (preferred) or %s", EnvPrivateKeyPath, EnvPrivateKey)
+	return nil, "", fmt.Errorf("a private key is required: set %s (preferred), %s, or %s", EnvPrivateKeyPath, EnvPrivateKey, EnvPrivateKeyAlias)
 }
 
 // validateAPIURL ensures a caller-supplied API base URL is safe to send

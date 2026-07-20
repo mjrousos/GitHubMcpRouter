@@ -118,10 +118,15 @@ refreshed automatically).
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `GITHUB_APP_ID` | yes | Numeric GitHub App ID (used as the JWT issuer). |
+| `GITHUB_APP_ID` | yes | Numeric GitHub App ID (used as the JWT issuer). Alias: `MCP_ROUTER_APP_ID`. |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | one of the two | Path to the app's PEM private key. **Preferred.** |
-| `GITHUB_APP_PRIVATE_KEY` | one of the two | The PEM private key contents (used only if `_PATH` is unset). |
+| `GITHUB_APP_PRIVATE_KEY` | one of the two | The PEM private key contents (used only if `_PATH` is unset). Alias: `MCP_ROUTER_APP_PRIVATE_KEY`. |
 | `GITHUB_API_URL` | no | API base URL for GitHub Enterprise Server (must be an absolute `https` URL); defaults to the public API. |
+
+The app ID and inline private key each accept an `MCP_ROUTER_`-prefixed alias
+for environments where the `GITHUB_`-prefixed names are reserved or unavailable.
+When both a name and its alias are set, the `GITHUB_` name wins. On startup the
+server logs which variables supplied the app ID and private key.
 
 Behavior:
 
@@ -161,10 +166,13 @@ installation and delegates:
 Children are spawned lazily, cached for the server's lifetime, and shut down on
 exit (a child that exits is evicted and re-spawned on the next call). Each child
 inherits this server's `GITHUB_APP_ID` / private-key env and receives its own
-`GITHUB_APP_INSTALLATION_ID`. Conflicting credentials
-(`GITHUB_PERSONAL_ACCESS_TOKEN`, `GITHUB_TOKEN`) are stripped so children always
-authenticate as the installation, and for GitHub Enterprise the child's
-`GITHUB_HOST` is derived from `GITHUB_API_URL`.
+`GITHUB_APP_INSTALLATION_ID`. If the router was configured via the
+`MCP_ROUTER_*` aliases, the canonical `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY`
+are propagated to the children (which only understand the `GITHUB_` names), so
+routed tools authenticate too; existing canonical values are never overwritten.
+Conflicting credentials (`GITHUB_PERSONAL_ACCESS_TOKEN`, `GITHUB_TOKEN`) are
+stripped so children always authenticate as the installation, and for GitHub
+Enterprise the child's `GITHUB_HOST` is derived from `GITHUB_API_URL`.
 
 Install the GitHub App-capable `github-mcp-server` and make sure it is on `PATH`
 (or point `GITHUB_MCP_SERVER_PATH` at it):
