@@ -209,22 +209,35 @@ func newHTTPServer(ctx context.Context, cfg Config, httpCfg HTTPConfig) *http.Se
 
 // serveHTTP serves srv on ln until ctx is cancelled, then gracefully shuts it
 // down. It returns the first error from serving or shutting down.
+//
+// It waits on either the serve result or context cancellation, and only blocks
+// for a graceful shutdown when it initiates one. This avoids leaking a goroutine
+// (or blocking forever) if srv.Serve returns for a reason other than this
+// function's own shutdown — e.g. srv.Close() called elsewhere or the listener
+// closing.
 func serveHTTP(ctx context.Context, srv *http.Server, ln net.Listener) error {
-	shutdownErr := make(chan error, 1)
-	go func() {
-		<-ctx.Done()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+
+	select {
+	case err := <-serveErr:
+		// The server stopped on its own, before we asked it to.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("error running HTTP server: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		// We initiate a graceful shutdown, then wait for Serve to return (it
+		// returns http.ErrServerClosed once Shutdown completes).
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 		defer cancel()
-		shutdownErr <- srv.Shutdown(shutdownCtx)
-	}()
-
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("error running HTTP server: %w", err)
+		shutdownErr := srv.Shutdown(shutdownCtx)
+		<-serveErr
+		if shutdownErr != nil {
+			return fmt.Errorf("error shutting down HTTP server: %w", shutdownErr)
+		}
+		return nil
 	}
-	if err := <-shutdownErr; err != nil {
-		return fmt.Errorf("error shutting down HTTP server: %w", err)
-	}
-	return nil
 }
 
 // maxBytesHandler limits the request body to limit bytes before delegating to

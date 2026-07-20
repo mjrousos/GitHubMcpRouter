@@ -145,6 +145,37 @@ func TestHTTPGracefulShutdownWithConnectedClient(t *testing.T) {
 	}
 }
 
+// TestServeHTTPReturnsWhenServerClosedExternally asserts that serveHTTP returns
+// promptly (and does not leak its serve goroutine) when the server stops for a
+// reason other than context cancellation — here, a direct srv.Close(). The
+// context is never cancelled, so this exercises the serve-result branch.
+func TestServeHTTPReturnsWhenServerClosedExternally(t *testing.T) {
+	srv := newHTTPServer(context.Background(), Config{Version: "http-test"}, HTTPConfig{})
+	ln, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	// ctx is never cancelled; the only way serveHTTP returns is via Serve.
+	served := make(chan error, 1)
+	go func() { served <- serveHTTP(context.Background(), srv, ln) }()
+
+	// Give Serve a moment to start, then close the server out from under it.
+	time.Sleep(50 * time.Millisecond)
+	if err := srv.Close(); err != nil {
+		t.Fatalf("srv.Close: %v", err)
+	}
+
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("serveHTTP returned an error on external close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveHTTP did not return after the server was closed externally")
+	}
+}
+
 // TestHTTPEndpointBuilt checks that newHTTPServer wires the expected address and
 // a reachable /healthz without starting a listener.
 func TestHTTPEndpointBuilt(t *testing.T) {
