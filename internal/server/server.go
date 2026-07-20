@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -306,38 +305,35 @@ func buildRouterFromEnv(auth *githubapp.Authenticator, ghCfg *githubapp.Config, 
 
 // childBaseEnv augments env with the canonical GitHub App variables that spawned
 // github-mcp-server children expect (GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY),
-// when they are not already present. This lets the routed tools authenticate
-// even when the router itself was configured via the MCP_ROUTER_* aliases, which
-// only this router understands. Existing canonical values are never overwritten.
+// when the router itself was configured via the MCP_ROUTER_* aliases. The
+// children only understand the GITHUB_ names, so without this they would fail to
+// authenticate.
+//
+// Whether a canonical value is already available to the children is decided from
+// which variable supplied it (ghCfg's sources) rather than by scanning env:
+// those sources come from os.Getenv, so this stays correct under platform env
+// semantics (e.g. Windows' case-insensitive names). A value the operator set
+// under a canonical name — including a key path — is inherited by the children
+// as-is and is never overwritten or duplicated inline.
 func childBaseEnv(env []string, ghCfg *githubapp.Config) []string {
 	if ghCfg == nil {
 		return env
 	}
-	if !envHas(env, githubapp.EnvAppID) {
+	// A source of the alias implies the canonical name was unset (lookupEnv
+	// prefers the canonical name), so the children need it supplied.
+	if ghCfg.AppIDSource == githubapp.EnvAppIDAlias {
 		env = append(env, fmt.Sprintf("%s=%d", githubapp.EnvAppID, ghCfg.AppID))
 		fmt.Fprintf(os.Stderr, "Propagating %s to github-mcp-server children (resolved from %s)\n",
 			githubapp.EnvAppID, ghCfg.AppIDSource)
 	}
-	// The child accepts the key via a path or inline; only inject the inline
-	// form when neither canonical variable is already set.
-	if !envHas(env, githubapp.EnvPrivateKeyPath) && !envHas(env, githubapp.EnvPrivateKey) {
+	// Only the inline alias needs bridging: a canonical inline key or a key path
+	// is already visible to the children under a name they understand.
+	if ghCfg.PrivateKeySource == githubapp.EnvPrivateKeyAlias {
 		env = append(env, githubapp.EnvPrivateKey+"="+string(ghCfg.PrivateKey))
 		fmt.Fprintf(os.Stderr, "Propagating %s to github-mcp-server children (resolved from %s)\n",
 			githubapp.EnvPrivateKey, ghCfg.PrivateKeySource)
 	}
 	return env
-}
-
-// envHas reports whether env contains a non-empty assignment for key (in
-// "KEY=VALUE" form).
-func envHas(env []string, key string) bool {
-	prefix := key + "="
-	for _, kv := range env {
-		if value, ok := strings.CutPrefix(kv, prefix); ok && strings.TrimSpace(value) != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // loadAuthenticatorFromEnv builds a GitHub App authenticator from environment

@@ -89,7 +89,7 @@ func LoadConfigFromEnv() (*Config, error) {
 	if appIDRaw == "" {
 		return nil, fmt.Errorf("a GitHub App ID must be set (%s or %s) to authenticate as a GitHub App", EnvAppID, EnvAppIDAlias)
 	}
-	appID, err := strconv.ParseInt(appIDRaw, 10, 64)
+	appID, err := strconv.ParseInt(strings.TrimSpace(appIDRaw), 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("%s must be a numeric GitHub App ID, got %q", appIDSource, appIDRaw)
 	}

@@ -135,6 +135,18 @@ func TestLoadConfigFromEnv_PathPreferredOverInline(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFromEnv_AppIDTrimmed(t *testing.T) {
+	setEnv(t, "  12345  ", "", "PEM", "")
+
+	cfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AppID != 12345 {
+		t.Errorf("AppID = %d, want 12345", cfg.AppID)
+	}
+}
+
 func TestLoadConfigFromEnv_Errors(t *testing.T) {
 	t.Run("missing app id", func(t *testing.T) {
 		setEnv(t, "", "", "PEM", "")

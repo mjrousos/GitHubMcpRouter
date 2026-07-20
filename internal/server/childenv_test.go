@@ -33,30 +33,57 @@ func TestChildBaseEnv_InjectsCanonicalFromAliases(t *testing.T) {
 	}
 }
 
-// TestChildBaseEnv_DoesNotOverwriteCanonical verifies that existing canonical
-// values (including a key supplied via the path variable) are left untouched.
-func TestChildBaseEnv_DoesNotOverwriteCanonical(t *testing.T) {
-	env := []string{"GITHUB_APP_ID=7", "GITHUB_APP_PRIVATE_KEY_PATH=/k.pem"}
-	got := childBaseEnv(slices.Clone(env), aliasConfig())
+// TestChildBaseEnv_CanonicalSourcesNotInjected verifies that when the values
+// came from canonical names (app ID from GITHUB_APP_ID, key from the path
+// variable), nothing is injected — the children inherit those names directly.
+// This also covers the case-sensitivity concern: the decision keys off the
+// resolved source (via os.Getenv), not a case-sensitive scan of the env slice.
+func TestChildBaseEnv_CanonicalSourcesNotInjected(t *testing.T) {
+	cfg := &githubapp.Config{
+		AppID:            7,
+		PrivateKey:       []byte("FROM-FILE"),
+		AppIDSource:      githubapp.EnvAppID,
+		PrivateKeySource: githubapp.EnvPrivateKeyPath,
+	}
+	env := []string{"PATH=/usr/bin"}
+	got := childBaseEnv(slices.Clone(env), cfg)
 
 	if !slices.Equal(got, env) {
-		t.Errorf("expected env to be unchanged, got %v", got)
+		t.Errorf("expected env to be unchanged for canonical sources, got %v", got)
 	}
 }
 
-// TestChildBaseEnv_InjectsOnlyMissing verifies each canonical variable is
-// injected independently: here the app ID is already present but the key is not.
-func TestChildBaseEnv_InjectsOnlyMissing(t *testing.T) {
-	got := childBaseEnv([]string{"GITHUB_APP_ID=7"}, aliasConfig())
+// TestChildBaseEnv_CanonicalInlineKeyNotInjected verifies a key from the
+// canonical inline variable is not re-injected.
+func TestChildBaseEnv_CanonicalInlineKeyNotInjected(t *testing.T) {
+	cfg := &githubapp.Config{
+		AppID:            7,
+		PrivateKey:       []byte("PEM"),
+		AppIDSource:      githubapp.EnvAppID,
+		PrivateKeySource: githubapp.EnvPrivateKey,
+	}
+	if got := childBaseEnv(nil, cfg); len(got) != 0 {
+		t.Errorf("expected no injection for canonical sources, got %v", got)
+	}
+}
 
-	if slices.Contains(got, "GITHUB_APP_ID=42") {
-		t.Errorf("must not override an existing GITHUB_APP_ID, got %v", got)
+// TestChildBaseEnv_InjectsOnlyAliasedValues verifies each variable is bridged
+// independently: here the app ID came from the alias but the key from a path,
+// so only the app ID is injected (never the path-sourced key inline).
+func TestChildBaseEnv_InjectsOnlyAliasedValues(t *testing.T) {
+	cfg := &githubapp.Config{
+		AppID:            42,
+		PrivateKey:       []byte("FROM-FILE"),
+		AppIDSource:      githubapp.EnvAppIDAlias,
+		PrivateKeySource: githubapp.EnvPrivateKeyPath,
 	}
-	if !slices.Contains(got, "GITHUB_APP_ID=7") {
-		t.Errorf("existing GITHUB_APP_ID=7 should remain, got %v", got)
+	got := childBaseEnv(nil, cfg)
+
+	if !slices.Contains(got, "GITHUB_APP_ID=42") {
+		t.Errorf("expected the aliased app ID to be injected, got %v", got)
 	}
-	if !slices.Contains(got, "GITHUB_APP_PRIVATE_KEY=PEM") {
-		t.Errorf("expected the missing private key to be injected, got %v", got)
+	if slices.Contains(got, "GITHUB_APP_PRIVATE_KEY=FROM-FILE") {
+		t.Errorf("must not inject a path-sourced key inline, got %v", got)
 	}
 }
 
@@ -66,26 +93,5 @@ func TestChildBaseEnv_NilConfig(t *testing.T) {
 	got := childBaseEnv(slices.Clone(env), nil)
 	if !slices.Equal(got, env) {
 		t.Errorf("expected env to be unchanged for a nil config, got %v", got)
-	}
-}
-
-func TestEnvHas(t *testing.T) {
-	env := []string{"GITHUB_APP_ID=5", "EMPTY=", "SPACES=  ", "GITHUB_APP_PRIVATE_KEY_PATH=/k.pem"}
-	cases := []struct {
-		key  string
-		want bool
-	}{
-		{"GITHUB_APP_ID", true},
-		{"EMPTY", false},   // present but empty counts as absent
-		{"SPACES", false},  // whitespace-only counts as absent
-		{"MISSING", false}, // not present at all
-		// A prefix must match up to '=', so this must not match the _PATH entry.
-		{"GITHUB_APP_PRIVATE_KEY", false},
-		{"GITHUB_APP_PRIVATE_KEY_PATH", true},
-	}
-	for _, tc := range cases {
-		if got := envHas(env, tc.key); got != tc.want {
-			t.Errorf("envHas(%q) = %v, want %v", tc.key, got, tc.want)
-		}
 	}
 }
